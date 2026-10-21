@@ -7,6 +7,10 @@ import * as Engine from '../audioEngine';
 import { cleanTitle, formatTime } from '../utils';
 import { Screen, Btn, SongPicker, useAppTheme } from './Tools';
 import { FileSystem as FS, saveFile } from './saver';
+import { fetchDetails, fetchLyrics, loadArt } from '../library';
+import { readTagsJs } from '../tagReader';
+import { extractEmbeddedArt } from '../embeddedArt';
+import { withEdit, getEditCover } from '../edits';
 
 const Mka = NativeModules ? NativeModules.Mka : null;
 
@@ -18,6 +22,82 @@ const toPath = (uri) => {
     return p;
   }
 };
+const txt = (v) => (v === null || v === undefined ? '' : String(v).trim());
+const yr = (v) => {
+  const n = parseInt(String(v), 10);
+  return isFinite(n) && n > 0 ? n : 0;
+};
+
+// Collects everything that belongs to ONE version: its own title, artist, writer, lyrics and cover.
+// Your changes made inside the app (Edit song) are included, and the cover is copied untouched (never shrunk).
+async function gatherMeta(song) {
+  let d = null;
+  try {
+    d = await fetchDetails(song.uri);
+  } catch (e) {}
+  if (!d || d._error || !(d.title || d.artist || d.albumTitle)) {
+    try {
+      const j = await readTagsJs({ uri: song.uri, id: song.id });
+      if (j) d = j;
+    } catch (e) {}
+  }
+  if (!d || d._error) d = {};
+  const base = {
+    id: song.id,
+    fileTitle: song.title,
+    title: txt(d.title) || song.title,
+    artist: txt(d.artist),
+    albumArtist: txt(d.albumArtist),
+    album: txt(d.albumTitle),
+    genre: txt(d.genre),
+    year: yr(d.year),
+    composer: txt(d.composer),
+  };
+  const ed = withEdit(base);
+
+  let lyrics = '';
+  if (ed.lyricsEdit !== undefined) {
+    lyrics = txt(ed.lyricsEdit) ? String(ed.lyricsEdit) : '';
+  } else {
+    try {
+      const r = await fetchLyrics(song.uri);
+      lyrics = r && r.text ? r.text : '';
+    } catch (e) {}
+  }
+
+  let cover = '';
+  const own = getEditCover(song.id); // undefined = no change, null = removed, string = your own picture
+  if (typeof own === 'string') {
+    cover = own;
+  } else if (own === undefined) {
+    try {
+      cover = (await extractEmbeddedArt({ id: 'mkasrc_' + song.id, uri: song.uri })) || '';
+    } catch (e) {}
+    if (!cover) {
+      // backup: the library's own cover reader
+      cover = await new Promise((res) => {
+        try {
+          loadArt({ id: song.id, uri: song.uri, title: song.title }, (u) => res(u || ''));
+        } catch (e) {
+          res('');
+        }
+      });
+    }
+  }
+
+  return {
+    title: ed.title || song.title,
+    artist: ed.artist || '',
+    albumArtist: ed.albumArtist || '',
+    album: ed.album || '',
+    genre: ed.genre || '',
+    year: ed.year || 0,
+    composer: ed.composer || '',
+    lyrics,
+    cover,
+  };
+}
+
 const safe = (s) => String(s || 'bundle').replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'bundle';
 
 // shows what is playing from a bundle (only mounted while the screen is open)
@@ -99,11 +179,23 @@ export default function MkaScreen() {
     if (open && tab === 'bundles') loadBundles();
   }, [open, tab, loadBundles]);
 
-  const addSong = (song) => {
+  const addSong = async (song) => {
     setPickOpen(false);
-    setItems((l) => [...l, { key: song.id + '_' + Date.now(), uri: song.uri, name: song.title }]);
-    if (!title) setTitle(song.title);
+    setBusy('Reading the details of ' + song.title + '…');
+    let m = null;
+    try {
+      m = await gatherMeta(song);
+    } catch (e) {}
+    setBusy('');
+    if (!m) m = { title: song.title, artist: '', albumArtist: '', album: '', genre: '', year: 0, composer: '', lyrics: '', cover: '' };
+    setItems((l) => [
+      ...l,
+      { key: song.id + '_' + Date.now(), uri: song.uri, name: l.length === 0 ? 'Original' : '', ...m },
+    ]);
+    if (!title) setTitle(m.title || song.title);
   };
+
+  const setField = (key, field, value) => setItems((l) => l.map((x) => (x.key === key ? { ...x, [field]: value } : x)));
 
   const rename = (key, name) => setItems((l) => l.map((x) => (x.key === key ? { ...x, name } : x)));
   const remove = (key) => setItems((l) => l.filter((x) => x.key !== key));
@@ -131,10 +223,25 @@ export default function MkaScreen() {
     setBusy('Creating the bundle…');
     try {
       const out = FS.cacheDirectory + name + '.mka';
-      await Mka.create(JSON.stringify(items.map((i) => ({ uri: i.uri, name: i.name || 'Version' }))), title || name, toPath(out));
+      const payload = items.map((i, n) => ({
+        uri: i.uri,
+        name: txt(i.name) || (n === 0 ? 'Original' : 'Version ' + (n + 1)),
+        cover: i.cover || '',
+        meta: {
+          title: txt(i.title),
+          artist: txt(i.artist),
+          albumArtist: txt(i.albumArtist),
+          album: txt(i.album),
+          genre: txt(i.genre),
+          year: i.year || 0,
+          composer: txt(i.composer),
+          lyrics: i.lyrics || '',
+        },
+      }));
+      await Mka.create(JSON.stringify(payload), title || name, toPath(out));
       const where = await saveFile(out, name + '.mka', 'audio/x-matroska', true);
       setBusy('');
-      Alert.alert('Bundle created', 'Saved in ' + where + '\nOpen "My bundles" to play the versions.');
+      Alert.alert('Bundle created', 'Saved in ' + where + '\nPull to refresh your library: it shows up as ONE song. Open it in the player and tap the Versions button to switch.');
       setItems([]);
       setTitle('');
       setTab('bundles');
@@ -163,10 +270,10 @@ export default function MkaScreen() {
       const p = await Mka.extract(toPath(b.uri), tr.number, out);
       await Engine.player.load(
         { id: 'mka_' + b.id + '_' + tr.number, uri: 'file://' + p, duration: (info.durationMs || 0) / 1000 },
-        { title: tr.name, artist: info.title || b.title, album: info.title || b.title },
+        { title: tr.title || tr.name, artist: tr.artist || info.title || b.title, album: tr.album || info.title || b.title },
         1
       );
-      setNow({ name: tr.name, title: info.title || b.title });
+      setNow({ name: tr.name, title: tr.title || info.title || b.title });
     } catch (e) {
       Alert.alert('Could not play it', String(e && e.message ? e.message : e));
     }
@@ -202,7 +309,7 @@ export default function MkaScreen() {
         {tab === 'create' ? (
           <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
             <Text style={{ color: t.muted, fontSize: 13 }}>
-              Put the original song and its remixes or edits into one file. The audio is copied as it is, so the quality stays exactly the same.
+              Put the original song and its remixes or edits into one file. The audio is copied as it is, so the quality stays exactly the same. Every version keeps its own cover, lyrics and writer. In your library the bundle shows as ONE song (the first version). Open it in the player and tap Versions to pick another.
             </Text>
             <TextInput
               value={title}
@@ -231,7 +338,27 @@ export default function MkaScreen() {
                     <Ionicons name="trash-outline" size={20} color={t.muted} />
                   </TouchableOpacity>
                 </View>
-                {i === 0 ? <Text style={{ color: t.muted, fontSize: 11, marginLeft: 22 }}>Plays first by default</Text> : null}
+                <TextInput
+                  value={it.title}
+                  onChangeText={(v) => setField(it.key, 'title', v)}
+                  placeholder="Song title of this version"
+                  placeholderTextColor={t.muted}
+                  style={{ marginLeft: 22, color: t.text, fontSize: 13, paddingVertical: 3 }}
+                />
+                <TextInput
+                  value={it.artist}
+                  onChangeText={(v) => setField(it.key, 'artist', v)}
+                  placeholder="Artist of this version"
+                  placeholderTextColor={t.muted}
+                  style={{ marginLeft: 22, color: t.text, fontSize: 13, paddingVertical: 3 }}
+                />
+                <Text style={{ color: t.muted, fontSize: 11, marginLeft: 22, marginTop: 2 }}>
+                  {(it.composer ? 'Writer: ' + it.composer + '  ·  ' : '') +
+                    (it.cover ? 'Cover ✓' : 'No cover') +
+                    '  ·  ' +
+                    (it.lyrics ? 'Lyrics ✓' : 'No lyrics')}
+                </Text>
+                {i === 0 ? <Text style={{ color: t.muted, fontSize: 11, marginLeft: 22 }}>The first one is the main song shown in your library</Text> : null}
               </View>
             ))}
             <Btn t={t} icon="add" label="Add a song from my library" alt onPress={() => setPickOpen(true)} style={{ marginTop: 12 }} />
@@ -259,6 +386,11 @@ export default function MkaScreen() {
                   <Text style={{ color: t.text, fontSize: 15, fontWeight: '700' }} numberOfLines={1}>
                     {tr.name}
                   </Text>
+                  {tr.title || tr.artist ? (
+                    <Text style={{ color: t.muted, fontSize: 12 }} numberOfLines={1}>
+                      {(tr.title || '') + (tr.artist ? ' · ' + tr.artist : '')}
+                    </Text>
+                  ) : null}
                   <Text style={{ color: t.muted, fontSize: 12 }}>
                     {tr.codec} · {tr.channels === 1 ? 'Mono' : tr.channels === 2 ? 'Stereo' : tr.channels + ' ch'} · {Math.round(tr.rate / 100) / 10} kHz
                   </Text>
