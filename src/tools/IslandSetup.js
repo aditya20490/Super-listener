@@ -1,4 +1,4 @@
-// The Island setup screen: the three permissions Android needs, plus position and size.
+// The Island setup screen: the three permissions Android needs, plus live position and size.
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Modal, TouchableOpacity, ScrollView, AppState, NativeModules, DeviceEventEmitter, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -54,7 +54,7 @@ function Stepper({ t, label, value, unit, onChange, min, max, step }) {
   const b = (txt, d) => (
     <TouchableOpacity
       onPress={() => onChange(Math.max(min, Math.min(max, value + d)))}
-      style={{ width: 40, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: t.track }}
+      style={{ width: 44, height: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: t.track }}
     >
       <Text style={{ color: t.text, fontSize: 20, fontWeight: '800' }}>{txt}</Text>
     </TouchableOpacity>
@@ -73,7 +73,7 @@ export default function IslandSetup() {
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [st, setSt] = useState({ accessibility: false, notification: false, battery: false });
-  const [pf, setPf] = useState({ enabled: true, offset: 6, width: 120 });
+  const [pf, setPf] = useState({ enabled: true, yoff: 0, width: 120, height: 34 });
   const t = useAppTheme(open);
 
   const refresh = useCallback(async () => {
@@ -88,13 +88,29 @@ export default function IslandSetup() {
     }
   }, []);
 
+  // Tell the island whether the app is open (it hides itself while the app is open)
+  useEffect(() => {
+    if (!Island) return undefined;
+    Island.setForeground(AppState.currentState === 'active');
+    const app = AppState.addEventListener('change', (s) => {
+      Island.setForeground(s === 'active');
+      if (s === 'active') refresh();
+    });
+    return () => app.remove();
+  }, [refresh]);
+
+  // While this screen is open the real island is shown, so you can see it change live
+  useEffect(() => {
+    if (Island) Island.setPreview(open);
+    return () => {
+      if (Island) Island.setPreview(false);
+    };
+  }, [open]);
+
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('openIslandSetup', () => {
       refresh();
       setOpen(true);
-    });
-    const app = AppState.addEventListener('change', (s) => {
-      if (s === 'active') refresh();
     });
     // the first time, open the setup by itself
     (async () => {
@@ -108,22 +124,19 @@ export default function IslandSetup() {
         }
       } catch (e) {}
     })();
-    return () => {
-      sub.remove();
-      app.remove();
-    };
+    return () => sub.remove();
   }, [refresh]);
 
   const setPref = (patch) => {
     const n = { ...pf, ...patch };
     setPf(n);
-    if (Island) Island.setPrefs(!!n.enabled, n.offset, n.width);
+    if (Island) Island.setPrefs(!!n.enabled, n.yoff, n.width, n.height);
   };
 
   const test = async () => {
     try {
       const ok = await Island.demo();
-      if (!ok) Alert.alert('Nothing to show yet', 'Turn on the permissions above, play a song, then press the home button and tap Test again.');
+      if (!ok) Alert.alert('The island is not showing', 'Turn on the Accessibility permission above first.');
     } catch (e) {}
   };
 
@@ -151,6 +164,30 @@ export default function IslandSetup() {
                   <Text style={{ color: '#fff', fontWeight: '800' }}>All set ✓ Play a song and leave the app.</Text>
                 </View>
               ) : null}
+
+              <View style={{ backgroundColor: t.card, borderRadius: 16, padding: 14, marginTop: 12 }}>
+                <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Look</Text>
+                <Text style={{ color: t.muted, fontSize: 12, marginTop: 4 }}>
+                  Look at the top of your screen: the real island is shown there while this screen is open. Press + and − and watch it change.
+                </Text>
+                <TouchableOpacity onPress={() => setPref({ enabled: !pf.enabled })} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                  <Ionicons name={pf.enabled ? 'toggle' : 'toggle-outline'} size={34} color={t.accent} />
+                  <Text style={{ marginLeft: 10, color: t.text, fontSize: 14 }}>Show the island</Text>
+                </TouchableOpacity>
+                <Stepper t={t} label="Up / down" value={pf.yoff} unit="dp" min={-30} max={40} step={1} onChange={(v) => setPref({ yoff: v })} />
+                <Stepper t={t} label="Width" value={pf.width} unit="dp" min={80} max={220} step={4} onChange={(v) => setPref({ width: v })} />
+                <Stepper t={t} label="Height" value={pf.height} unit="dp" min={24} max={50} step={1} onChange={(v) => setPref({ height: v })} />
+                <TouchableOpacity
+                  onPress={test}
+                  style={{ marginTop: 14, paddingVertical: 11, borderRadius: 12, alignItems: 'center', backgroundColor: t.accent }}
+                >
+                  <Text style={{ color: t.onAccent, fontWeight: '800' }}>Show it open</Text>
+                </TouchableOpacity>
+                <Text style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
+                  Tip: line the island up so the camera hole is in the middle of it. It hides while Music Plus is open, because the app has its own
+                  island.
+                </Text>
+              </View>
 
               <Step
                 t={t}
@@ -195,25 +232,6 @@ export default function IslandSetup() {
                   </TouchableOpacity>
                 </View>
               ) : null}
-
-              <View style={{ backgroundColor: t.card, borderRadius: 16, padding: 14, marginTop: 12 }}>
-                <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Look</Text>
-                <TouchableOpacity onPress={() => setPref({ enabled: !pf.enabled })} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
-                  <Ionicons name={pf.enabled ? 'toggle' : 'toggle-outline'} size={34} color={t.accent} />
-                  <Text style={{ marginLeft: 10, color: t.text, fontSize: 14 }}>Show the island</Text>
-                </TouchableOpacity>
-                <Stepper t={t} label="Distance from the top" value={pf.offset} unit="dp" min={0} max={60} step={2} onChange={(v) => setPref({ offset: v })} />
-                <Stepper t={t} label="Pill width" value={pf.width} unit="dp" min={70} max={220} step={10} onChange={(v) => setPref({ width: v })} />
-                <TouchableOpacity
-                  onPress={test}
-                  style={{ marginTop: 14, paddingVertical: 11, borderRadius: 12, alignItems: 'center', backgroundColor: t.accent }}
-                >
-                  <Text style={{ color: t.onAccent, fontWeight: '800' }}>Test</Text>
-                </TouchableOpacity>
-                <Text style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
-                  Tap the small pill to open it. It hides while Music Plus is open, because the app has its own island.
-                </Text>
-              </View>
             </>
           )}
         </ScrollView>
