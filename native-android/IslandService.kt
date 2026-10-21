@@ -30,15 +30,16 @@ import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import kotlin.math.max
 import kotlin.math.min
 
-// The Dynamic Island: a black pill drawn on top of every app (needs the Accessibility permission).
-// It reads what is playing from the phone's media sessions (needs Notification access).
+// The Dynamic Island: a black pill drawn on top of every app, right over the camera hole.
+// Needs the Accessibility permission (to draw) and Notification access (to read what is playing).
 class IslandService : AccessibilityService() {
   companion object {
     @Volatile var instance: IslandService? = null
@@ -49,13 +50,15 @@ class IslandService : AccessibilityService() {
   private var msm: MediaSessionManager? = null
   private var comp: ComponentName? = null
   private var registered = false
-  private var lastPull = 0L
   private val controllers = ArrayList<MediaController>()
   private val callbacks = HashMap<MediaController, MediaController.Callback>()
   private var cur: MediaController? = null
+  private val kg by lazy { getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager }
+  private val ease = PathInterpolator(0.2f, 0f, 0f, 1f)
 
   private lateinit var root: FrameLayout
-  private lateinit var small: LinearLayout
+  private lateinit var card: FrameLayout
+  private lateinit var small: FrameLayout
   private lateinit var big: LinearLayout
   private lateinit var smallArt: ImageView
   private lateinit var eq: EqView
@@ -75,16 +78,16 @@ class IslandService : AccessibilityService() {
   private var attached = false
   private var expanded = false
   private var anim: ValueAnimator? = null
-  private var fgPkg = ""
   private var lastTrack = ""
   private var artBitmap: Bitmap? = null
   private var lastArtTry = 0L
   private var lastPlayingAt = 0L
   private var collapseAt = 0L
+  private var unwantedSince = 0L
 
   private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
   private fun smallW(): Int = dp(IslandPrefs.width(this))
-  private fun smallH(): Int = dp(34)
+  private fun smallH(): Int = dp(IslandPrefs.height(this))
   private fun bigW(): Int = min(resources.displayMetrics.widthPixels - dp(24), dp(360))
   private fun bigH(): Int = dp(146)
 
@@ -115,15 +118,8 @@ class IslandService : AccessibilityService() {
     main.post(tick)
   }
 
-  override fun onAccessibilityEvent(e: AccessibilityEvent?) {
-    if (e == null || e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-    val p = e.packageName?.toString() ?: return
-    if (p.contains("systemui") || p.contains("inputmethod") || p == "android") return
-    if (p != fgPkg) {
-      fgPkg = p
-      evaluate()
-    }
-  }
+  // We do not use window events any more: the app tells us when it is open.
+  override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
 
   override fun onInterrupt() {}
 
@@ -163,30 +159,33 @@ class IslandService : AccessibilityService() {
     if (built) return
     built = true
     bg.setColor(Color.BLACK)
-    bg.cornerRadius = dp(17).toFloat()
+    bg.cornerRadius = smallH() / 2f
+
     root = FrameLayout(this)
-    root.background = bg
-    root.setOnClickListener {
+    card = FrameLayout(this)
+    card.background = bg
+    card.setOnClickListener {
       if (!expanded) {
         morph(true)
         touch()
       }
     }
+    root.addView(card, FrameLayout.LayoutParams(smallW(), smallH(), Gravity.TOP or Gravity.CENTER_HORIZONTAL))
 
-    // small pill
-    small = LinearLayout(this)
-    small.orientation = LinearLayout.HORIZONTAL
-    small.gravity = Gravity.CENTER_VERTICAL
-    small.setPadding(dp(8), 0, dp(12), 0)
+    // small pill: cover on the left, bars on the right, the camera sits in the middle
+    small = FrameLayout(this)
     smallArt = ImageView(this)
     smallArt.scaleType = ImageView.ScaleType.CENTER_CROP
-    round(smallArt, dp(12).toFloat())
+    round(smallArt, dp(11).toFloat())
     smallArt.setImageDrawable(ColorDrawable(0xFF333333.toInt()))
-    small.addView(smallArt, LinearLayout.LayoutParams(dp(24), dp(24)))
-    small.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+    val al = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.START or Gravity.CENTER_VERTICAL)
+    al.leftMargin = dp(9)
+    small.addView(smallArt, al)
     eq = EqView(this)
-    small.addView(eq, LinearLayout.LayoutParams(dp(18), dp(16)))
-    root.addView(small, FrameLayout.LayoutParams(-1, -1))
+    val el = FrameLayout.LayoutParams(dp(16), dp(14), Gravity.END or Gravity.CENTER_VERTICAL)
+    el.rightMargin = dp(13)
+    small.addView(eq, el)
+    card.addView(small, FrameLayout.LayoutParams(-1, -1))
 
     // big card
     big = LinearLayout(this)
@@ -263,7 +262,7 @@ class IslandService : AccessibilityService() {
     ctl.addView(btnPlay, LinearLayout.LayoutParams(dp(64), dp(40)))
     ctl.addView(btnNext, LinearLayout.LayoutParams(dp(56), dp(40)))
     big.addView(ctl, LinearLayout.LayoutParams(-1, dp(40)))
-    root.addView(big, FrameLayout.LayoutParams(-1, -1))
+    card.addView(big, FrameLayout.LayoutParams(bigW(), bigH(), Gravity.TOP or Gravity.CENTER_HORIZONTAL))
     big.visibility = View.GONE
 
     lp = WindowManager.LayoutParams(
@@ -273,16 +272,40 @@ class IslandService : AccessibilityService() {
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
       PixelFormat.TRANSLUCENT
     )
     lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-    lp.y = dp(IslandPrefs.offset(this))
+    lp.title = "MusicPlusIsland"
     if (Build.VERSION.SDK_INT >= 30) {
       lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
     } else if (Build.VERSION.SDK_INT >= 28) {
       lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
     }
+    lp.y = topPx(smallH())
+  }
+
+  // Top edge of the pill so that it sits centered on the camera hole
+  private fun topPx(h: Int): Int {
+    var cy = -1
+    try {
+      if (Build.VERSION.SDK_INT >= 30) {
+        val cut = wm?.currentWindowMetrics?.windowInsets?.displayCutout
+        if (cut != null) {
+          for (r in cut.boundingRects) {
+            if (r.top <= dp(6) && r.height() > 0 && r.height() <= dp(60)) cy = (r.top + r.bottom) / 2
+          }
+        }
+      }
+    } catch (t: Throwable) {
+    }
+    if (cy < 0) {
+      val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+      val sb = if (id > 0) resources.getDimensionPixelSize(id) else dp(28)
+      cy = sb / 2
+    }
+    return max(0, cy - h / 2 + dp(IslandPrefs.yoff(this)))
   }
 
   private fun updateLayout() {
@@ -291,12 +314,41 @@ class IslandService : AccessibilityService() {
     }
   }
 
+  private fun setCard(w: Int, h: Int) {
+    val cl = card.layoutParams as FrameLayout.LayoutParams
+    cl.width = w
+    cl.height = h
+    card.layoutParams = cl
+  }
+
+  private fun resetToSmall() {
+    expanded = false
+    anim?.cancel()
+    setCard(smallW(), smallH())
+    lp.width = smallW()
+    lp.height = smallH()
+    lp.y = topPx(smallH())
+    bg.cornerRadius = smallH() / 2f
+    small.visibility = View.VISIBLE
+    small.alpha = 1f
+    big.visibility = View.GONE
+    big.alpha = 0f
+    card.alpha = 1f
+    card.scaleX = 1f
+  }
+
   private fun attach() {
     if (attached || !built) return
     resetToSmall()
     try {
       wm?.addView(root, lp)
       attached = true
+      // grows out of the camera hole
+      card.alpha = 0f
+      card.scaleX = 0.6f
+      card.pivotX = smallW() / 2f
+      card.pivotY = 0f
+      card.animate().alpha(1f).scaleX(1f).setDuration(220).setInterpolator(ease).start()
     } catch (t: Throwable) {
     }
   }
@@ -304,42 +356,38 @@ class IslandService : AccessibilityService() {
   private fun detach() {
     if (!attached) return
     anim?.cancel()
+    card.animate().cancel()
     try { wm?.removeView(root) } catch (t: Throwable) {}
     attached = false
-    resetToSmall()
-  }
-
-  private fun resetToSmall() {
     expanded = false
-    lp.width = smallW()
-    lp.height = smallH()
-    lp.y = dp(IslandPrefs.offset(this))
-    bg.cornerRadius = dp(17).toFloat()
-    small.visibility = View.VISIBLE
-    small.alpha = 1f
-    big.visibility = View.GONE
-    big.alpha = 0f
   }
 
   private fun morph(toExpanded: Boolean) {
     if (!attached || expanded == toExpanded) return
     expanded = toExpanded
     anim?.cancel()
-    val fromW = lp.width
-    val fromH = lp.height
+    val cl = card.layoutParams as FrameLayout.LayoutParams
+    val fromW = cl.width
+    val fromH = cl.height
     val toW = if (toExpanded) bigW() else smallW()
     val toH = if (toExpanded) bigH() else smallH()
     val fromR = bg.cornerRadius
-    val toR = if (toExpanded) dp(30).toFloat() else dp(17).toFloat()
+    val toR = if (toExpanded) dp(30).toFloat() else smallH() / 2f
+    if (toExpanded) {
+      // the window becomes big first, then the black shape grows inside it (smooth)
+      lp.width = bigW()
+      lp.height = bigH()
+      updateLayout()
+    }
     big.visibility = View.VISIBLE
     small.visibility = View.VISIBLE
+    var cancelled = false
     val a = ValueAnimator.ofFloat(0f, 1f)
-    a.duration = 300
-    a.interpolator = DecelerateInterpolator()
+    a.duration = 320
+    a.interpolator = ease
     a.addUpdateListener { v ->
       val f = v.animatedValue as Float
-      lp.width = (fromW + (toW - fromW) * f).toInt()
-      lp.height = (fromH + (toH - fromH) * f).toInt()
+      setCard((fromW + (toW - fromW) * f).toInt(), (fromH + (toH - fromH) * f).toInt())
       bg.cornerRadius = fromR + (toR - fromR) * f
       if (toExpanded) {
         big.alpha = ((f - 0.35f) / 0.65f).coerceIn(0f, 1f)
@@ -348,11 +396,22 @@ class IslandService : AccessibilityService() {
         big.alpha = (1f - f * 2.5f).coerceIn(0f, 1f)
         small.alpha = ((f - 0.5f) / 0.5f).coerceIn(0f, 1f)
       }
-      updateLayout()
     }
     a.addListener(object : AnimatorListenerAdapter() {
+      override fun onAnimationCancel(animation: Animator) {
+        cancelled = true
+      }
+
       override fun onAnimationEnd(animation: Animator) {
-        if (expanded) small.visibility = View.GONE else big.visibility = View.GONE
+        if (cancelled) return
+        if (expanded) {
+          small.visibility = View.GONE
+        } else {
+          big.visibility = View.GONE
+          lp.width = smallW()
+          lp.height = smallH()
+          updateLayout()
+        }
       }
     })
     anim = a
@@ -482,59 +541,95 @@ class IslandService : AccessibilityService() {
     val playing = st != null && (st.state == PlaybackState.STATE_PLAYING || st.state == PlaybackState.STATE_BUFFERING)
     if (playing) lastPlayingAt = now
     val md = c?.metadata
-    val locked = (getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
-    val want = IslandPrefs.enabled(this) && c != null && md != null &&
-      (playing || now - lastPlayingAt < 5000) && fgPkg != packageName && !locked
-    if (!want || c == null || md == null) {
+    val preview = IslandState.preview
+    val hardHide = !IslandPrefs.enabled(this) || kg.isKeyguardLocked || (IslandState.appForeground && !preview)
+    val hasMedia = c != null && md != null && (playing || now - lastPlayingAt < 5000)
+
+    if (hardHide) {
+      unwantedSince = 0L
       if (attached) detach()
       return
     }
-    val title = md.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
-    val artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST)
-      ?: md.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
-      ?: md.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE) ?: ""
-    val key = title + "|" + artist + "|" + c.packageName
-    val changed = key != lastTrack
-    if (!attached) attach()
-    if (changed) {
-      lastTrack = key
-      artBitmap = null
-      lastArtTry = 0L
-      titleV.text = title
-      artistV.text = artist
-      setArt(null)
-    }
-    if (artBitmap == null && now - lastArtTry > 2000) {
-      lastArtTry = now
-      val b = artOf(md)
-      if (b != null) {
-        artBitmap = b
-        setArt(b)
+    if (!hasMedia && !preview) {
+      // wait a moment before hiding, so short hiccups do not make it blink
+      if (attached) {
+        if (unwantedSince == 0L) unwantedSince = now
+        if (now - unwantedSince > 1500) {
+          unwantedSince = 0L
+          detach()
+        }
       }
+      return
     }
-    btnPlay.set(if (playing) 2 else 1)
-    eq.active = playing
-    if (changed && playing && attached) {
-      morph(true)
-      collapseAt = now + 3500
+    unwantedSince = 0L
+    if (!attached) attach()
+
+    if (hasMedia && md != null && c != null) {
+      val title = md.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
+      val artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST)
+        ?: md.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+        ?: md.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE) ?: ""
+      val key = title + "|" + artist + "|" + c.packageName
+      val changed = key != lastTrack
+      if (changed) {
+        lastTrack = key
+        artBitmap = null
+        lastArtTry = 0L
+        titleV.text = title
+        artistV.text = artist
+        setArt(null)
+      }
+      if (artBitmap == null && now - lastArtTry > 2000) {
+        lastArtTry = now
+        val b = artOf(md)
+        if (b != null) {
+          artBitmap = b
+          setArt(b)
+        }
+      }
+      btnPlay.set(if (playing) 2 else 1)
+      eq.active = playing
+      if (changed && playing && attached) {
+        morph(true)
+        collapseAt = now + 3500
+      }
+    } else if (lastTrack != "preview") {
+      // nothing is playing: show a sample while you adjust the island
+      lastTrack = "preview"
+      artBitmap = null
+      titleV.text = "Preview"
+      artistV.text = "This is how the island looks"
+      setArt(null)
+      btnPlay.set(2)
+      eq.active = false
     }
   }
 
   // ---------- called from the app ----------
+  fun refresh() {
+    evaluate()
+  }
+
   fun applyPrefs() {
     if (!built) return
-    lp.y = dp(IslandPrefs.offset(this))
-    if (!expanded) lp.width = smallW()
+    lp.y = topPx(smallH())
+    if (!expanded) {
+      setCard(smallW(), smallH())
+      lp.width = smallW()
+      lp.height = smallH()
+      bg.cornerRadius = smallH() / 2f
+    }
     updateLayout()
     evaluate()
   }
 
   fun demo(): Boolean {
-    if (pick() == null) return false
+    if (!built) return false
     lastPlayingAt = SystemClock.elapsedRealtime()
     evaluate()
+    if (!attached) return false
     morph(true)
     collapseAt = SystemClock.elapsedRealtime() + 4000
-    return attached
+    return true
   }
 }
