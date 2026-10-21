@@ -19,6 +19,18 @@ jobs:
       - name: Get repo code
         uses: actions/checkout@v4
 
+      - name: Get the music player code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/my-music-app
+          path: old-music
+
+      - name: Get the tag editor code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/audio-tag-editor
+          path: old-tags
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -51,8 +63,10 @@ jobs:
           cd musicapp
           rm -rf App.tsx App.js src
           cp ../App.js App.js
-          cp ../MusicApp.js MusicApp.js
-          cp -r ../src src
+          cp ../old-music/App.js MusicApp.js
+          cp -r ../old-music/src src
+          mkdir -p src/tools
+          cp ../src/tools/* src/tools/
           npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview
           npx expo install --fix
           npm install react-native-track-player@4.1.2
@@ -99,6 +113,7 @@ jobs:
           add_native() {
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
+            cp ../old-music/native-android/*.kt "$K/"
             cp ../native-android/*.kt "$K/"
             MA=$(find android/app/src/main/java -name 'MainApplication.*' | head -1)
             if grep -q "EightDPackage" "$MA"; then return; fi
