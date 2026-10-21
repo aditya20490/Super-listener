@@ -21,6 +21,8 @@ class IslandListener : NotificationListenerService()
 class IslandModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) {
   override fun getName(): String = "Island"
 
+  private val main = Handler(Looper.getMainLooper())
+
   private fun app(): Context = reactApplicationContext.applicationContext
 
   private fun go(i: Intent) {
@@ -77,20 +79,40 @@ class IslandModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ct
   fun getPrefs(p: Promise) {
     val m = Arguments.createMap()
     m.putBoolean("enabled", IslandPrefs.enabled(app()))
-    m.putInt("offset", IslandPrefs.offset(app()))
+    m.putInt("yoff", IslandPrefs.yoff(app()))
     m.putInt("width", IslandPrefs.width(app()))
+    m.putInt("height", IslandPrefs.height(app()))
     p.resolve(m)
   }
 
   @ReactMethod
-  fun setPrefs(enabled: Boolean, offset: Int, width: Int) {
-    IslandPrefs.sp(app()).edit().putBoolean("enabled", enabled).putInt("offset", offset).putInt("width", width).apply()
-    Handler(Looper.getMainLooper()).post { IslandService.instance?.applyPrefs() }
+  fun setPrefs(enabled: Boolean, yoff: Int, width: Int, height: Int) {
+    IslandPrefs.sp(app()).edit()
+      .putBoolean("enabled", enabled)
+      .putInt("yoff", yoff)
+      .putInt("width", width)
+      .putInt("height", height)
+      .apply()
+    main.post { IslandService.instance?.applyPrefs() }
+  }
+
+  // The app tells the island when it is open (the island hides itself then, the app has its own)
+  @ReactMethod
+  fun setForeground(open: Boolean) {
+    IslandState.appForeground = open
+    main.post { IslandService.instance?.refresh() }
+  }
+
+  // While the setup screen is open, show the real island so you can see it move live
+  @ReactMethod
+  fun setPreview(on: Boolean) {
+    IslandState.preview = on
+    main.post { IslandService.instance?.refresh() }
   }
 
   @ReactMethod
   fun demo(p: Promise) {
-    Handler(Looper.getMainLooper()).post {
+    main.post {
       val s = IslandService.instance
       p.resolve(s != null && s.demo())
     }
