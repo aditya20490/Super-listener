@@ -13,11 +13,18 @@ import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sin
 
+// Shared state between the app and the island (the app tells the island when it is open)
+object IslandState {
+  @Volatile var appForeground = false
+  @Volatile var preview = false
+}
+
 object IslandPrefs {
   fun sp(c: Context) = c.getSharedPreferences("island", Context.MODE_PRIVATE)
   fun enabled(c: Context): Boolean = sp(c).getBoolean("enabled", true)
-  fun offset(c: Context): Int = sp(c).getInt("offset", 6)
+  fun yoff(c: Context): Int = sp(c).getInt("yoff", 0)
   fun width(c: Context): Int = sp(c).getInt("width", 120)
+  fun height(c: Context): Int = sp(c).getInt("height", 34)
 }
 
 // Little drawn icons so we don't depend on any font: 0 previous, 1 play, 2 pause, 3 next
