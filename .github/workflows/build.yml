@@ -1,0 +1,148 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repo code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Speed up builds with cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Pack the tag editor page
+        run: node make-tag-editor.js
+
+      - name: Create the app project
+        run: |
+          # Pinned to SDK 54: the newest SDK forces React Native's new architecture,
+          # which react-native-track-player 4.1.2 can't run on (app opens and closes at once)
+          npx create-expo-app@latest musicapp --template blank@sdk-54
+          cd musicapp
+          rm -rf App.tsx App.js src
+          cp ../App.js App.js
+          cp ../MusicApp.js MusicApp.js
+          cp -r ../src src
+          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview
+          npx expo install --fix
+          npm install react-native-track-player@4.1.2
+          # track-player's Kotlin code breaks with the newest React Native (Bundle? vs Bundle), so we fix those 2 lines here
+          MM=node_modules/react-native-track-player/android/src/main/java/com/doublesymmetry/trackplayer/module/MusicModule.kt
+          sed -i -e 's/\.tracks\[index\]\.originalItem))/.tracks[index].originalItem ?: android.os.Bundle()))/' -e 's/^\( *musicService\.tracks\[musicService\.getCurrentTrackIndex()\]\.originalItem\)$/\1 ?: android.os.Bundle()/' "$MM"
+          echo "Patched lines:"; grep -n "originalItem" "$MM" || true
+          npm install @missingcore/react-native-metadata-retriever@^3.2.1 || echo "Song details library failed to install, continuing without it"
+
+      - name: Set app name, package and permissions
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          cd musicapp
+          node -e "
+          const fs = require('fs');
+          const cfg = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+          const run = parseInt(process.env.RUN_NUMBER, 10);
+          cfg.expo.name = 'Music Plus';
+          cfg.expo.slug = 'music-plus';
+          cfg.expo.version = '1.0.' + run;
+          cfg.expo.userInterfaceStyle = 'automatic';
+          cfg.expo.newArchEnabled = false;
+          cfg.expo.android = cfg.expo.android || {};
+          cfg.expo.android.package = 'com.mymusic.plus';
+          cfg.expo.android.versionCode = run;
+          cfg.expo.android.permissions = [
+            'android.permission.READ_MEDIA_AUDIO',
+            'android.permission.READ_EXTERNAL_STORAGE',
+            'android.permission.POST_NOTIFICATIONS',
+            'android.permission.FOREGROUND_SERVICE',
+            'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+            'android.permission.WAKE_LOCK'
+          ];
+          cfg.expo.plugins = ['expo-media-library'];
+          fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
+          "
+
+      - name: Build APK
+        run: |
+          set +e
+          GRADLE_PROPS='\norg.gradle.parallel=true\norg.gradle.caching=true\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g\n'
+          # our own small native modules (8D engine + file saver), copied into the Android project and registered
+          add_native() {
+            K=android/app/src/main/java/com/mymusic/player
+            mkdir -p "$K"
+            cp ../native-android/*.kt "$K/"
+            MA=$(find android/app/src/main/java -name 'MainApplication.*' | head -1)
+            if grep -q "EightDPackage" "$MA"; then return; fi
+            sed -i 's/PackageList(this).packages.apply {/&\n              add(com.mymusic.player.EightDPackage())/' "$MA"
+            echo "MainApplication check:"; grep -n "EightDPackage" "$MA" || echo "WARNING: native package was not registered"
+          }
+          cd musicapp
+          npx expo prebuild --platform android
+          add_native
+          printf "$GRADLE_PROPS" >> android/gradle.properties
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a 2>&1 | tee /tmp/gradle1.log
+          STATUS=${PIPESTATUS[0]}
+          cd ../..
+          if [ "$STATUS" -eq 0 ]; then
+            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED." > release_notes.md
+            exit 0
+          fi
+          echo "First build failed, trying again without the song details library"
+          {
+            echo "Build $GITHUB_RUN_NUMBER: the song details library was NOT included, because the first build failed."
+            echo ""
+            echo "Error summary:"
+            echo '```'
+            grep -E "^e: " /tmp/gradle1.log | head -15
+            sed -n '/What went wrong/,/Try:/p' /tmp/gradle1.log | head -30
+            echo '```'
+          } > release_notes.md
+          cd musicapp
+          npm uninstall @missingcore/react-native-metadata-retriever
+          rm -rf android
+          npx expo prebuild --platform android
+          add_native
+          printf "$GRADLE_PROPS" >> android/gradle.properties
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+          exit $?
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body_path: release_notes.md
+          files: musicapp/android/app/build/outputs/apk/release/app-release.apk
