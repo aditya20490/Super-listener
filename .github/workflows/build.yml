@@ -55,6 +55,9 @@ jobs:
       - name: Pack the tag editor page
         run: node make-tag-editor.js
 
+      - name: Add the Island row to the menu
+        run: node patch-tools.js
+
       - name: Create the app project
         run: |
           # Pinned to SDK 54: the newest SDK forces React Native's new architecture,
@@ -99,7 +102,8 @@ jobs:
             'android.permission.POST_NOTIFICATIONS',
             'android.permission.FOREGROUND_SERVICE',
             'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
-            'android.permission.WAKE_LOCK'
+            'android.permission.WAKE_LOCK',
+            'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
           ];
           cfg.expo.plugins = ['expo-media-library'];
           fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
@@ -109,12 +113,36 @@ jobs:
         run: |
           set +e
           GRADLE_PROPS='\norg.gradle.parallel=true\norg.gradle.caching=true\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g\n'
-          # our own small native modules (8D engine + file saver), copied into the Android project and registered
+          # our own native parts (8D engine, file saver, Dynamic Island), copied into the Android project and registered
           add_native() {
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
             cp ../old-music/native-android/*.kt "$K/"
             cp ../native-android/*.kt "$K/"
+
+            # the Island: two services in the manifest + the accessibility settings file
+            MF=android/app/src/main/AndroidManifest.xml
+            if ! grep -q "IslandService" "$MF"; then
+              sed -i '/<\/application>/e cat ../native-android/island-manifest.xml' "$MF"
+            fi
+            mkdir -p android/app/src/main/res/xml android/app/src/main/res/values
+            cat > android/app/src/main/res/xml/island_service.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="100"
+              android:description="@string/island_desc" />
+          XML
+            cat > android/app/src/main/res/values/island_strings.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="island_desc">Draws the music pill (Dynamic Island) on top of other apps. It does not read or collect anything from your screen.</string>
+          </resources>
+          XML
+
             MA=$(find android/app/src/main/java -name 'MainApplication.*' | head -1)
             if grep -q "EightDPackage" "$MA"; then return; fi
             sed -i 's/PackageList(this).packages.apply {/&\n              add(com.mymusic.player.EightDPackage())/' "$MA"
