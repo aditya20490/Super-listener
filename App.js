@@ -1,10 +1,11 @@
-// New root: your music player, unchanged, plus the Tools button and the Island setup on top of it.
+// New root: your music player, unchanged, plus the Tools button, the Island setup and the MKA bundles on top of it.
 import React, { useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import MusicApp from './MusicApp';
 import Tools from './src/tools/Tools';
 import IslandSetup from './src/tools/IslandSetup';
+import MkaScreen from './src/tools/MkaScreen';
 
 export default function App() {
   const [k, setK] = useState(0);
@@ -15,6 +16,7 @@ export default function App() {
         <MusicApp key={k} />
         <Tools onChanged={() => setK((n) => n + 1)} />
         <IslandSetup />
+        <MkaScreen />
       </View>
     </SafeAreaProvider>
   );
