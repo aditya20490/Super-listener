@@ -69,10 +69,30 @@ class TrackDesc(
   val seekPreRollNs: Long = 0L
 )
 
-class MkaInfo(val title: String, val durationMs: Double, val tracks: List<TrackDesc>, val numbers: List<Int>)
+// A file stored inside the bundle (a cover picture, or versions.json with the details of every version)
+class Att(val name: String, val mime: String, val pos: Long, val len: Long)
+
+// What goes into the bundle as an attachment (either bytes in memory or a file on disk, so a 10 MB cover is never copied twice)
+class AttSrc(val name: String, val mime: String, val bytes: ByteArray?, val file: File?) {
+  fun length(): Long = if (bytes != null) bytes.size.toLong() else (file?.length() ?: 0L)
+}
+
+class MkaInfo(
+  val title: String,
+  val durationMs: Double,
+  val tracks: List<TrackDesc>,
+  val numbers: List<Int>,
+  val meta: String,
+  val atts: List<Att>
+)
 
 // ---------- Matroska writer: header, tracks, interleaved clusters, cues (so seeking works) ----------
-class MkaWriter(private val file: File, private val title: String, private val tracks: List<TrackDesc>) {
+class MkaWriter(
+  private val file: File,
+  private val title: String,
+  private val tracks: List<TrackDesc>,
+  private val atts: List<AttSrc> = emptyList()
+) {
   private var raf: RandomAccessFile? = null
   private var segSizePos = 0L
   private var segDataStart = 0L
@@ -140,6 +160,49 @@ class MkaWriter(private val file: File, private val title: String, private val t
     durPatchPos = r.filePointer + info.size - 8
     r.write(info)
     r.write(tr)
+    writeAttachments(r)
+  }
+
+  // Covers and the details of every version. Written before the audio, and streamed straight from disk (the pictures are never shrunk).
+  private fun writeAttachments(r: RandomAccessFile) {
+    if (atts.isEmpty()) return
+    val metas = ArrayList<ByteArray>()
+    val dataHdrs = ArrayList<ByteArray>()
+    val fileHdrs = ArrayList<ByteArray>()
+    var total = 0L
+    var uid = 7000L
+    for (a in atts) {
+      val len = a.length()
+      uid++
+      val meta = Ebml.cat(Ebml.str(0x466E, a.name), Ebml.str(0x4660, a.mime), Ebml.uint(0x46AE, uid))
+      val dataHdr = Ebml.cat(Ebml.idBytes(0x465C), Ebml.sizeBytes(len))
+      val payload = meta.size.toLong() + dataHdr.size.toLong() + len
+      val fileHdr = Ebml.cat(Ebml.idBytes(0x61A7), Ebml.sizeBytes(payload))
+      metas.add(meta)
+      dataHdrs.add(dataHdr)
+      fileHdrs.add(fileHdr)
+      total += fileHdr.size.toLong() + payload
+    }
+    r.write(Ebml.idBytes(0x1941A469))
+    r.write(Ebml.sizeBytes(total))
+    val chunk = ByteArray(65536)
+    for (i in atts.indices) {
+      val a = atts[i]
+      r.write(fileHdrs[i])
+      r.write(metas[i])
+      r.write(dataHdrs[i])
+      if (a.bytes != null) {
+        r.write(a.bytes)
+      } else if (a.file != null) {
+        FileInputStream(a.file).use { ins ->
+          while (true) {
+            val n = ins.read(chunk)
+            if (n < 0) break
+            r.write(chunk, 0, n)
+          }
+        }
+      }
+    }
   }
 
   private fun flush() {
@@ -308,12 +371,47 @@ class MkaReader(file: File) {
     }
   }
 
+  private fun readAttached(end: Long, out: ArrayList<Att>) {
+    var name = ""
+    var mime = ""
+    var pos = -1L
+    var len = 0L
+    while (raf.filePointer < end) {
+      val c = readHdr() ?: break
+      val ce = c.dataPos + c.size
+      when (c.id) {
+        0x466EL -> name = readStr(c.size.toInt())
+        0x4660L -> mime = readStr(c.size.toInt())
+        0x465CL -> { pos = c.dataPos; len = c.size }
+        else -> {}
+      }
+      raf.seek(ce)
+    }
+    if (pos >= 0 && name.isNotEmpty()) out.add(Att(name, mime, pos, len))
+  }
+
+  // Copies one stored file (a cover) out to disk, byte for byte
+  fun copyAtt(a: Att, dest: File) {
+    raf.seek(a.pos)
+    val chunk = ByteArray(65536)
+    var left = a.len
+    java.io.FileOutputStream(dest).use { o ->
+      while (left > 0) {
+        val n = raf.read(chunk, 0, if (left < chunk.size) left.toInt() else chunk.size)
+        if (n < 0) break
+        o.write(chunk, 0, n)
+        left -= n.toLong()
+      }
+    }
+  }
+
   fun readInfo(): MkaInfo {
     if (!enterSegment()) throw Exception("This is not a Matroska (.mka) file")
     var title = ""
     var dur = 0.0
     val tracks = ArrayList<TrackDesc>()
     val nums = ArrayList<Int>()
+    val atts = ArrayList<Att>()
     while (raf.filePointer < segEnd) {
       val h = readHdr() ?: break
       if (h.id == 0x1F43B675L || h.size < 0) break
@@ -337,10 +435,25 @@ class MkaReader(file: File) {
           if (c.id == 0xAEL) readEntry(ce, tracks, nums)
           raf.seek(ce)
         }
+      } else if (h.id == 0x1941A469L) {
+        while (raf.filePointer < end) {
+          val c = readHdr() ?: break
+          val ce = c.dataPos + c.size
+          if (c.id == 0x61A7L) readAttached(ce, atts)
+          raf.seek(ce)
+        }
       }
       raf.seek(end)
     }
-    return MkaInfo(title, dur * timeScale / 1000000.0, tracks, nums)
+    var meta = ""
+    for (a in atts) {
+      if (a.name == "versions.json" && a.len in 1..16000000L) {
+        raf.seek(a.pos)
+        meta = readStr(a.len.toInt())
+        break
+      }
+    }
+    return MkaInfo(title, dur * timeScale / 1000000.0, tracks, nums, meta, atts)
   }
 
   private fun block(pos: Long, size: Int, ct: Long, want: Int, cb: (Long, ByteArray) -> Unit) {
@@ -474,6 +587,8 @@ class MkaModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) 
       try {
         val arr = JSONArray(inputsJson)
         val descs = ArrayList<TrackDesc>()
+        val atts = ArrayList<AttSrc>()
+        val versionsMeta = JSONArray()
         for (i in 0 until arr.length()) {
           val o = arr.getJSONObject(i)
           val u = o.getString("uri")
@@ -506,8 +621,41 @@ class MkaModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) 
             )
             else -> throw Exception("\"" + name + "\" is " + mime + ". Supported: MP3, AAC/M4A, FLAC and Opus.")
           }
+
+          // the details of this version (title, artist, writer, lyrics...) and its own cover
+          val entry = JSONObject()
+          entry.put("number", i + 1)
+          entry.put("name", name)
+          if (fmt.containsKey(MediaFormat.KEY_DURATION)) entry.put("durationMs", fmt.getLong(MediaFormat.KEY_DURATION) / 1000L)
+          val m = o.optJSONObject("meta")
+          if (m != null) {
+            for (key in arrayOf("title", "artist", "albumArtist", "album", "genre", "year", "composer", "lyrics")) {
+              if (m.has(key)) entry.put(key, m.get(key))
+            }
+          }
+          var coverName = ""
+          val coverPath = o.optString("cover", "")
+          if (coverPath.isNotEmpty()) {
+            val cf = File(coverPath.removePrefix("file://"))
+            if (cf.exists() && cf.length() > 0) {
+              val head = ByteArray(4)
+              try { FileInputStream(cf).use { it.read(head) } } catch (e: Exception) {}
+              val isPng = head[0] == 0x89.toByte() && head[1] == 0x50.toByte()
+              val isWebp = head[0] == 0x52.toByte() && head[1] == 0x49.toByte()
+              val ext = if (isPng) "png" else if (isWebp) "webp" else "jpg"
+              val cm = if (isPng) "image/png" else if (isWebp) "image/webp" else "image/jpeg"
+              coverName = "cover_" + (i + 1) + "." + ext
+              atts.add(AttSrc(coverName, cm, null, cf))
+            }
+          }
+          entry.put("cover", coverName)
+          versionsMeta.put(entry)
         }
-        val w = MkaWriter(File(outPath), title, descs)
+        val vj = JSONObject()
+        vj.put("format", 1)
+        vj.put("tracks", versionsMeta)
+        atts.add(AttSrc("versions.json", "application/json", vj.toString().toByteArray(Charsets.UTF_8), null))
+        val w = MkaWriter(File(outPath), title, descs, atts)
         writer = w
         w.start()
         val bb = ByteBuffer.allocate(4 * 1024 * 1024)
@@ -551,6 +699,51 @@ class MkaModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) 
     }.start()
   }
 
+  // The saved details of one version, or null (older bundles have none)
+  private fun metaOf(metaJson: String, number: Int): JSONObject? {
+    if (metaJson.isEmpty()) return null
+    return try {
+      val a = JSONObject(metaJson).getJSONArray("tracks")
+      var found: JSONObject? = null
+      for (k in 0 until a.length()) {
+        val e = a.getJSONObject(k)
+        if (e.optInt("number", -1) == number) { found = e; break }
+      }
+      found
+    } catch (e: Exception) {
+      null
+    }
+  }
+
+  // Copies the cover of one version out to its own picture file, exactly as stored (no resizing). Resolves with the file path, or "" when it has no cover.
+  @ReactMethod
+  fun cover(path: String, trackNo: Int, outBase: String, promise: Promise) {
+    Thread {
+      var r: MkaReader? = null
+      try {
+        r = MkaReader(File(path))
+        val info = r.readInfo()
+        val prefix = "cover_" + trackNo + "."
+        var hit: Att? = null
+        for (a in info.atts) {
+          if (a.name.startsWith(prefix)) { hit = a; break }
+        }
+        if (hit == null) {
+          promise.resolve("")
+        } else {
+          val ext = hit.name.substring(prefix.length)
+          val out = outBase + "." + ext
+          r.copyAtt(hit, File(out))
+          promise.resolve(out)
+        }
+      } catch (t: Throwable) {
+        promise.reject("MKA", t.message ?: "could not read the cover")
+      } finally {
+        r?.close()
+      }
+    }.start()
+  }
+
   @ReactMethod
   fun list(path: String, promise: Promise) {
     Thread {
@@ -577,6 +770,15 @@ class MkaModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) 
           })
           j.put("channels", t.channels)
           j.put("rate", t.rate)
+          val d = metaOf(info.meta, info.numbers[i])
+          if (d != null) {
+            for (key in arrayOf("title", "artist", "albumArtist", "album", "genre", "year", "composer", "lyrics", "durationMs")) {
+              if (d.has(key)) j.put(key, d.get(key))
+            }
+            j.put("hasCover", d.optString("cover", "").isNotEmpty())
+          } else {
+            j.put("hasCover", false)
+          }
           arr.put(j)
         }
         o.put("tracks", arr)
