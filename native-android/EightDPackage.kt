@@ -7,7 +7,7 @@ import com.facebook.react.uimanager.ViewManager
 
 class EightDPackage : ReactPackage {
   override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
-    listOf(EightDModule(reactContext), FileSaverModule(reactContext), IslandModule(reactContext))
+    listOf(EightDModule(reactContext), FileSaverModule(reactContext), IslandModule(reactContext), MkaModule(reactContext))
 
   override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
     emptyList()
