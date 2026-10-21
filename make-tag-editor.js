@@ -1,6 +1,6 @@
 // Runs during the build: packs the tag editor page (html + css + crop tool) into one JS file the app can show.
 const fs = require('fs');
-const dir = 'tag-editor/';
+const dir = 'old-tags/www/';
 let html = fs.readFileSync(dir + 'index.html', 'utf8');
 const css = fs.readFileSync(dir + 'app.css', 'utf8');
 const crop = fs.readFileSync(dir + 'crop.js', 'utf8');
