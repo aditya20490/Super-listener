@@ -96,6 +96,37 @@ class IslandModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ct
     main.post { IslandService.instance?.applyPrefs() }
   }
 
+  // The always-on cover (the cover on a dim black screen while the screen is off)
+  @ReactMethod
+  fun getAod(p: Promise) {
+    val m = Arguments.createMap()
+    m.putBoolean("enabled", AodPrefs.enabled(app()))
+    m.putInt("size", AodPrefs.size(app()))
+    m.putInt("bright", AodPrefs.bright(app()))
+    m.putBoolean("others", AodPrefs.others(app()))
+    p.resolve(m)
+  }
+
+  @ReactMethod
+  fun setAod(enabled: Boolean, size: Int, bright: Int, others: Boolean) {
+    IslandPrefs.sp(app()).edit()
+      .putBoolean("aod_on", enabled)
+      .putInt("aod_size", size)
+      .putInt("aod_bright", bright)
+      .putBoolean("aod_any", others)
+      .apply()
+    main.post { IslandService.instance?.applyPrefs() }
+  }
+
+  // Shows the cover for 6 seconds, so you can see how it looks without switching the screen off
+  @ReactMethod
+  fun previewAod(p: Promise) {
+    main.post {
+      val s = IslandService.instance
+      p.resolve(s != null && s.aodPreview())
+    }
+  }
+
   // The app tells the island when it is open (the island hides itself then, the app has its own)
   @ReactMethod
   fun setForeground(open: Boolean) {
