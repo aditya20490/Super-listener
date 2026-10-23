@@ -40,6 +40,7 @@ import kotlin.math.min
 
 // The Dynamic Island: a black pill drawn on top of every app, right over the camera hole.
 // Needs the Accessibility permission (to draw) and Notification access (to read what is playing).
+// It also runs the always-on cover (AodController): the cover on a dim black screen while the screen is off.
 class IslandService : AccessibilityService() {
   companion object {
     @Volatile var instance: IslandService? = null
@@ -53,6 +54,7 @@ class IslandService : AccessibilityService() {
   private val controllers = ArrayList<MediaController>()
   private val callbacks = HashMap<MediaController, MediaController.Callback>()
   private var cur: MediaController? = null
+  private var aod: AodController? = null
   private val kg by lazy { getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager }
   private val ease = PathInterpolator(0.2f, 0f, 0f, 1f)
 
@@ -100,6 +102,7 @@ class IslandService : AccessibilityService() {
         updateProgress()
         if (expanded && SystemClock.elapsedRealtime() > collapseAt) morph(false)
         evaluate()
+        aod?.tick()
       } catch (t: Throwable) {
       }
       main.postDelayed(this, 500)
@@ -113,6 +116,8 @@ class IslandService : AccessibilityService() {
     msm = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
     comp = ComponentName(this, IslandListener::class.java)
     buildViews()
+    if (aod == null) aod = AodController(this)
+    aod?.start()
     tryRegister()
     main.removeCallbacks(tick)
     main.post(tick)
@@ -130,6 +135,8 @@ class IslandService : AccessibilityService() {
       try { c.unregisterCallback(cb) } catch (t: Throwable) {}
     }
     callbacks.clear()
+    aod?.stop()
+    aod = null
     detach()
     instance = null
     super.onDestroy()
@@ -541,8 +548,9 @@ class IslandService : AccessibilityService() {
     val playing = st != null && (st.state == PlaybackState.STATE_PLAYING || st.state == PlaybackState.STATE_BUFFERING)
     if (playing) lastPlayingAt = now
     val md = c?.metadata
+    aod?.onMedia(c, playing)
     val preview = IslandState.preview
-    val hardHide = !IslandPrefs.enabled(this) || kg.isKeyguardLocked || (IslandState.appForeground && !preview)
+    val hardHide = !IslandPrefs.enabled(this) || kg.isKeyguardLocked || (IslandState.appForeground && !preview) || aod?.showing() == true
     val hasMedia = c != null && md != null && (playing || now - lastPlayingAt < 5000)
 
     if (hardHide) {
@@ -611,6 +619,7 @@ class IslandService : AccessibilityService() {
   }
 
   fun applyPrefs() {
+    aod?.applyPrefs()
     if (!built) return
     lp.y = topPx(smallH())
     if (!expanded) {
@@ -621,6 +630,12 @@ class IslandService : AccessibilityService() {
     }
     updateLayout()
     evaluate()
+  }
+
+  // Shows the always-on cover for a few seconds (from the setup screen)
+  fun aodPreview(): Boolean {
+    val a = aod ?: return false
+    return a.runPreview()
   }
 
   fun demo(): Boolean {
