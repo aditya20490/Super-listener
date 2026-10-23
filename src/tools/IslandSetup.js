@@ -1,4 +1,5 @@
 // The Island setup screen: the three permissions Android needs, plus live position and size.
+// It also has the settings of the always-on cover (the cover on a dim black screen while the screen is off).
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Modal, TouchableOpacity, ScrollView, AppState, NativeModules, DeviceEventEmitter, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -74,6 +75,7 @@ export default function IslandSetup() {
   const [open, setOpen] = useState(false);
   const [st, setSt] = useState({ accessibility: false, notification: false, battery: false });
   const [pf, setPf] = useState({ enabled: true, yoff: 0, width: 120, height: 34 });
+  const [aod, setAod] = useState({ enabled: true, size: 70, bright: 6, others: false });
   const t = useAppTheme(open);
 
   const refresh = useCallback(async () => {
@@ -82,6 +84,10 @@ export default function IslandSetup() {
       const s = await Island.status();
       setSt(s);
       setPf(await Island.getPrefs());
+      if (Island.getAod) {
+        const a = await Island.getAod();
+        if (a) setAod({ enabled: !!a.enabled, size: a.size, bright: a.bright, others: !!a.others });
+      }
       return s;
     } catch (e) {
       return null;
@@ -131,6 +137,23 @@ export default function IslandSetup() {
     const n = { ...pf, ...patch };
     setPf(n);
     if (Island) Island.setPrefs(!!n.enabled, n.yoff, n.width, n.height);
+  };
+
+  const setAodPref = (patch) => {
+    const n = { ...aod, ...patch };
+    setAod(n);
+    if (Island && Island.setAod) Island.setAod(!!n.enabled, n.size, n.bright, !!n.others);
+  };
+
+  const testAod = async () => {
+    try {
+      if (!Island.previewAod) {
+        Alert.alert('Not in this build', 'Install the newest build to use the always-on cover.');
+        return;
+      }
+      const ok = await Island.previewAod();
+      if (!ok) Alert.alert('The cover is not showing', 'Turn on the Accessibility permission below first.');
+    } catch (e) {}
   };
 
   const test = async () => {
@@ -186,6 +209,34 @@ export default function IslandSetup() {
                 <Text style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
                   Tip: line the island up so the camera hole is in the middle of it. It hides while Music Plus is open, because the app has its own
                   island.
+                </Text>
+              </View>
+
+              <View style={{ backgroundColor: t.card, borderRadius: 16, padding: 14, marginTop: 12 }}>
+                <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Always-on cover</Text>
+                <Text style={{ color: t.muted, fontSize: 12, marginTop: 4 }}>
+                  When you switch the screen off while music is playing, the screen stays on very dim, all black, and shows only the cover.
+                  Double tap the cover to get to your lock screen. Press the power button to switch the screen off for real.
+                </Text>
+                <TouchableOpacity onPress={() => setAodPref({ enabled: !aod.enabled })} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                  <Ionicons name={aod.enabled ? 'toggle' : 'toggle-outline'} size={34} color={t.accent} />
+                  <Text style={{ marginLeft: 10, color: t.text, fontSize: 14, flex: 1 }}>Show the cover when the screen is off</Text>
+                </TouchableOpacity>
+                <Stepper t={t} label="Cover size" value={aod.size} unit="%" min={30} max={100} step={5} onChange={(v) => setAodPref({ size: v })} />
+                <Stepper t={t} label="Screen brightness" value={aod.bright} unit="%" min={1} max={40} step={1} onChange={(v) => setAodPref({ bright: v })} />
+                <TouchableOpacity onPress={() => setAodPref({ others: !aod.others })} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                  <Ionicons name={aod.others ? 'toggle' : 'toggle-outline'} size={34} color={t.accent} />
+                  <Text style={{ marginLeft: 10, color: t.text, fontSize: 14, flex: 1 }}>Also for other music apps</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={testAod}
+                  style={{ marginTop: 14, paddingVertical: 11, borderRadius: 12, alignItems: 'center', backgroundColor: t.accent }}
+                >
+                  <Text style={{ color: t.onAccent, fontWeight: '800' }}>Preview the cover (6 seconds)</Text>
+                </TouchableOpacity>
+                <Text style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
+                  It needs the same permissions as the island (steps below). If your phone has its own Always-on display turned on, turn that
+                  off in the phone settings, so the two do not fight.
                 </Text>
               </View>
 
