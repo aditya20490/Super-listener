@@ -87,7 +87,7 @@ jobs:
           cp -r ../old-music/src src
           mkdir -p src/tools
           cp ../src/tools/* src/tools/
-          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview
+          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser
           npx expo install --fix
           npm install react-native-track-player@4.1.2
           # track-player's Kotlin code breaks with the newest React Native (Bundle? vs Bundle), so we fix those 2 lines here
