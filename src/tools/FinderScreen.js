@@ -1,6 +1,7 @@
-// Music Finder, built into the player. Songs (with previews and the Apple Music downloader), Covers, Lyrics and Task Automator.
-// It opens from the "Find it online" card in your song list, or by itself when you copy an Apple Music song link.
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+// Music Finder, built into the player. Same pages as your Music Finder app: Songs (download + search + previews),
+// Covers, Lyrics and Automate. It opens from the hamburger menu at the top left of the player, or by itself
+// when you copy an Apple Music song link.
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -17,47 +18,57 @@ import {
   AppState,
   ActivityIndicator,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
 import * as Clipboard from 'expo-clipboard';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Engine from '../audioEngine';
-import { Screen, Btn, useAppTheme } from './Tools';
-import { downloadToCache, saveFile } from './saver';
+import { Screen, useAppTheme } from './Tools';
 import { TASK, COUNTRY_LIST } from './finderData';
+
+let WebBrowser = null;
+try {
+  WebBrowser = require('expo-web-browser');
+} catch (e) {
+  WebBrowser = null;
+}
 
 const TA = NativeModules ? NativeModules.TaskAutomator : null;
 const LAST_CLIP_KEY = 'mm_finder_lastclip';
 
-const TABS = [
-  { key: 'songs', label: 'Songs', icon: 'musical-notes' },
-  { key: 'covers', label: 'Covers', icon: 'image' },
-  { key: 'lyrics', label: 'Lyrics', icon: 'document-text' },
-  { key: 'automate', label: 'Automate', icon: 'flash' },
+const NAV = [
+  { key: 'songs', label: 'Songs' },
+  { key: 'covers', label: 'Covers' },
+  { key: 'lyrics', label: 'Lyrics' },
+  { key: 'automate', label: 'Automate' },
 ];
 
 const ENTITIES = [
-  ['album', 'Album'],
-  ['idAlbum', 'Apple ID (Album)'],
-  ['tvSeason', 'TV Show'],
-  ['movie', 'Movie'],
-  ['ebook', 'iBook'],
-  ['software', 'App (iPhone)'],
-  ['iPadSoftware', 'App (iPad)'],
-  ['macSoftware', 'App (macOS)'],
-  ['audiobook', 'Audiobook'],
-  ['podcast', 'Podcast'],
-  ['musicVideo', 'Music Video'],
-  ['id', 'Apple ID (Movie)'],
-  ['shortFilm', 'Short Film'],
+  { code: 'album', name: 'Album' },
+  { code: 'idAlbum', name: 'Apple ID (Album)' },
+  { code: 'tvSeason', name: 'TV Show' },
+  { code: 'movie', name: 'Movie' },
+  { code: 'ebook', name: 'iBook' },
+  { code: 'software', name: 'App (iPhone or Universal)' },
+  { code: 'iPadSoftware', name: 'App (iPad)' },
+  { code: 'macSoftware', name: 'App (macOS)' },
+  { code: 'audiobook', name: 'Audiobook' },
+  { code: 'podcast', name: 'Podcast' },
+  { code: 'musicVideo', name: 'Music Video (may not work)' },
+  { code: 'id', name: 'Apple ID (Movie)' },
+  { code: 'shortFilm', name: 'Short Film' },
 ];
 
-const COUNTRIES = COUNTRY_LIST.split('|')
-  .map((x) => {
-    const i = x.indexOf(':');
-    return { code: x.slice(0, i), name: x.slice(i + 1) };
-  })
-  .sort((a, b) => a.name.localeCompare(b.name));
+// United States and United Kingdom first, then the rest A to Z (the same order as Music Finder)
+const ALL_COUNTRIES = COUNTRY_LIST.split('|').map((x) => {
+  const i = x.indexOf(':');
+  return { code: x.slice(0, i), name: x.slice(i + 1) };
+});
+const COUNTRIES = [
+  { code: 'us', name: 'United States of America' },
+  { code: 'gb', name: 'United Kingdom' },
+].concat(ALL_COUNTRIES.filter((c) => c.code !== 'us' && c.code !== 'gb').sort((a, b) => a.name.localeCompare(b.name)));
 
 // ---------- the same rules Music Finder uses ----------
 function appleUrl(u) {
@@ -164,11 +175,37 @@ async function getJson(url) {
   }
 }
 
-const safeName = (n) => String(n).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
+// Opens a web page inside the app (an in-app browser, so you can press and hold a picture to download it)
+function openInApp(url) {
+  try {
+    if (WebBrowser && WebBrowser.openBrowserAsync) {
+      WebBrowser.openBrowserAsync(url, { showTitle: true });
+      return;
+    }
+  } catch (e) {}
+  Linking.openURL(url).catch(() => {});
+}
+
+// a cover picture at its own shape (albums are square, posters are not)
+function CoverImage({ uri, t }) {
+  const [ratio, setRatio] = useState(1);
+  useEffect(() => {
+    Image.getSize(
+      uri,
+      (w, h) => {
+        if (w > 0 && h > 0) setRatio(w / h);
+      },
+      () => {}
+    );
+  }, [uri]);
+  return <Image source={{ uri: uri }} style={{ width: '100%', aspectRatio: ratio, borderRadius: 12, backgroundColor: t.track }} resizeMode="cover" />;
+}
 
 export default function FinderScreen() {
   const [open, setOpen] = useState(false);
-  const t = useAppTheme(open);
+  const [menu, setMenu] = useState(false);
+  const t = useAppTheme(open || menu);
+  const insets = useSafeAreaInsets();
   const [tab, setTab] = useState('songs');
 
   // songs
@@ -176,7 +213,7 @@ export default function FinderScreen() {
   const [log, setLog] = useState([]);
   const [busy, setBusy] = useState(false);
   const [songQ, setSongQ] = useState('');
-  const [songs, setSongs] = useState(null); // null = not searched, [] = nothing found
+  const [songs, setSongs] = useState(null);
   const [songMsg, setSongMsg] = useState('');
   const [playingId, setPlayingId] = useState(null);
   const previewRef = useRef(null);
@@ -185,19 +222,25 @@ export default function FinderScreen() {
   const [coverQ, setCoverQ] = useState('');
   const [entity, setEntity] = useState('album');
   const [region, setRegion] = useState('us');
-  const [regionOpen, setRegionOpen] = useState(false);
-  const [regionQ, setRegionQ] = useState('');
   const [covers, setCovers] = useState(null);
   const [coverMsg, setCoverMsg] = useState('');
-  const [saving, setSaving] = useState('');
+  const [isAppEntity, setIsAppEntity] = useState(false);
+  const [copied, setCopied] = useState('');
+  const entityRef = useRef('album');
+  const regionRef = useRef('us');
+  entityRef.current = entity;
+  regionRef.current = region;
 
   // lyrics
   const [lyricQ, setLyricQ] = useState('');
-  const [lyricUrl, setLyricUrl] = useState('');
+
+  // a pick-from-a-list window (Media, Region)
+  const [picker, setPicker] = useState(null);
+  const [pickerQ, setPickerQ] = useState('');
 
   const lastClip = useRef('');
 
-  // ---------- previews (a hidden page plays the 30 second clip, so your music player is not touched) ----------
+  // ---------- previews: a hidden page plays the 30 second clip, so your music player is not touched ----------
   const stopPreview = () => {
     try {
       if (previewRef.current) previewRef.current.injectJavaScript("var a=document.getElementById('a');if(a){a.pause();}true;");
@@ -214,11 +257,10 @@ export default function FinderScreen() {
       if (Engine.player && Engine.player.pause) Engine.player.pause(); // your own music pauses while you listen to the clip
     } catch (e) {}
     setPlayingId(s.id);
-    const url = JSON.stringify(s.preview);
     if (previewRef.current) {
       previewRef.current.injectJavaScript(
         "var a=document.getElementById('a');a.src=" +
-          url +
+          JSON.stringify(s.preview) +
           ";a.onended=function(){window.ReactNativeWebView.postMessage('end')};a.onerror=function(){window.ReactNativeWebView.postMessage('end')};a.play();true;"
       );
     }
@@ -246,24 +288,26 @@ export default function FinderScreen() {
       setSongMsg(list.length === 0 ? 'Nothing found' : '');
     } catch (e) {
       setSongs([]);
-      setSongMsg('Something went wrong, check your internet and try again');
+      setSongMsg('Something went wrong, try again');
     }
   };
 
-  const startDownload = async (raw) => {
-    const l = normaliseLink(raw);
+  // The download. The steps are exactly the recorded ones; only the song link changes each time.
+  const startDownload = async () => {
+    setLog([]);
+    const l = normaliseLink(link);
     if (!l) {
       setLog([{ k: 'bad', m: 'That is not an Apple Music song link.' }]);
       return;
     }
     if (!TA || !TA.run) {
-      setLog([{ k: 'bad', m: 'Downloading needs the newest build of the app.' }]);
+      setLog([{ k: 'bad', m: 'Task Automator is not available in this build.' }]);
       return;
     }
     stopPreview();
     setBusy(true);
-    setLog([{ k: '', m: 'Starting. A browser screen opens and does the steps for you.' }]);
     try {
+      setLog([{ k: '', m: 'Starting. A browser screen opens and does the steps for you.' }]);
       const out = await TA.run(TASK, l, '#id_url');
       setLog([{ k: 'good', m: 'Running ' + out.steps + ' steps. The file lands in your Downloads folder.' }]);
     } catch (e) {
@@ -272,83 +316,82 @@ export default function FinderScreen() {
     setTimeout(() => setBusy(false), 1500);
   };
 
-  const getSong = (s) => {
-    setLink(s.apple);
-    startDownload(s.apple);
-  };
-
   // ---------- covers ----------
   const searchCovers = async (qIn) => {
     const q = String(qIn === undefined ? coverQ : qIn).trim();
     if (!q) return;
+    const ent = entityRef.current;
     setCovers(null);
     setCoverMsg('Searching...');
     try {
-      const json = await getJson(buildSearchUrl(q, entity, region));
-      const list = processResults(json, entity);
+      const json = await getJson(buildSearchUrl(q, ent, regionRef.current));
+      const list = processResults(json, ent);
+      setIsAppEntity(ent === 'software' || ent === 'iPadSoftware' || ent === 'macSoftware');
       setCovers(list);
-      setCoverMsg(list.length === 0 ? 'Nothing found. Try another search or region.' : '');
+      setCoverMsg(list.length === 0 ? 'No results found.' : '');
     } catch (e) {
       setCovers([]);
       setCoverMsg('Something went wrong, try again');
     }
   };
 
-  const saveCover = async (url, title, label) => {
-    setSaving(url);
+  const copyLink = async (url) => {
     try {
-      const name = safeName(title) + ' ' + label + '.jpg';
-      const p = await downloadToCache(url, name);
-      await saveFile(p, name, 'image/jpeg', false);
-      Alert.alert('Saved', 'The picture is in Downloads / Music Plus.');
+      await Clipboard.setStringAsync(url);
+      setCopied(url);
     } catch (e) {
-      Alert.alert('Could not save', String(e && e.message ? e.message : e));
+      setCopied('');
+      Alert.alert('Could not copy');
+      return;
     }
-    setSaving('');
-  };
-
-  const copy = async (text) => {
-    try {
-      await Clipboard.setStringAsync(text);
-      Alert.alert('Copied', 'The link is copied.');
-    } catch (e) {}
+    setTimeout(() => setCopied(''), 1800);
   };
 
   // ---------- lyrics ----------
   const searchLyrics = (qIn) => {
     const q = String(qIn === undefined ? lyricQ : qIn).trim();
     if (!q) return;
-    setLyricUrl('https://www.lyricsify.com/search?q=' + encodeURIComponent(q).replace(/%20/g, '+'));
+    openInApp('https://www.lyricsify.com/search?q=' + encodeURIComponent(q).replace(/%20/g, '+'));
+  };
+
+  const openAutomator = () => {
+    if (TA && TA.openHome) TA.openHome();
+    else Alert.alert('Not available', 'Task Automator is not available in this build.');
+  };
+
+  const goTab = (key) => {
+    if (key === 'automate') {
+      openAutomator();
+      return;
+    }
+    if (key !== 'songs') stopPreview();
+    setTab(key);
   };
 
   // ---------- opening ----------
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('openFinder', (p) => {
       const info = p || {};
-      const q = String(info.query || '').trim();
       const wanted = info.tab || 'songs';
+      if (wanted === 'automate') {
+        setMenu(false);
+        openAutomator();
+        return;
+      }
+      setMenu(false);
       setOpen(true);
       setTab(wanted);
-      setLyricUrl('');
       if (info.link) {
         setLink(info.link);
         setLog([]);
       }
-      if (q) {
-        if (wanted === 'songs') {
-          setSongQ(q);
-          searchSongs(q);
-        } else if (wanted === 'covers') {
-          setCoverQ(q);
-          searchCovers(q);
-        } else if (wanted === 'lyrics') {
-          setLyricQ(q);
-          searchLyrics(q);
-        }
-      }
     });
-    return () => sub.remove();
-  }, [entity, region]);
+    const sub2 = DeviceEventEmitter.addListener('openFinderMenu', () => setMenu(true));
+    return () => {
+      sub.remove();
+      sub2.remove();
+    };
+  }, []);
 
   // Copy an Apple Music song link, open the app, and Music Finder opens by itself with the link filled in
   useEffect(() => {
@@ -381,32 +424,90 @@ export default function FinderScreen() {
     setOpen(false);
   };
 
-  const filteredCountries = useMemo(() => {
-    const q = regionQ.trim().toLowerCase();
-    return q ? COUNTRIES.filter((c) => c.name.toLowerCase().includes(q) || c.code === q) : COUNTRIES;
-  }, [regionQ]);
-
-  const input = {
-    backgroundColor: t.card,
+  // ---------- look: the Music Finder look in the player's colours ----------
+  const line = t.track;
+  const panel = { backgroundColor: t.card, borderWidth: 1, borderColor: line, borderRadius: 16, padding: 14, marginBottom: 18 };
+  const labelStyle = { color: t.muted, fontSize: 13, fontWeight: '600', marginBottom: 6, marginLeft: 2 };
+  const field = {
+    backgroundColor: line,
     color: t.text,
+    borderWidth: 1,
+    borderColor: line,
     borderRadius: 12,
     paddingHorizontal: 14,
-    height: 46,
-    fontSize: 15,
+    paddingVertical: 13,
+    fontSize: 16,
+    marginBottom: 12,
   };
-  const card = { backgroundColor: t.card, borderRadius: 16, padding: 14, marginBottom: 12 };
-  const label = { color: t.muted, fontSize: 12, fontWeight: '700', marginBottom: 6, marginTop: 4 };
+  const goBtn = (disabled) => ({
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 15,
+    borderRadius: 12,
+    backgroundColor: t.accent,
+    opacity: disabled ? 0.55 : 1,
+  });
+  const goText = { color: t.onAccent, fontSize: 17, fontWeight: '700' };
+  const ghostBtn = {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: line,
+    backgroundColor: line,
+  };
 
-  const regionName = (COUNTRIES.find((c) => c.code === region) || {}).name || region.toUpperCase();
+  const Heading = ({ eyebrow, title, lead }) => (
+    <View>
+      <Text style={{ color: t.accent, fontWeight: '700', fontSize: 13, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>{eyebrow}</Text>
+      <Text style={{ color: t.text, fontSize: 30, fontWeight: '800', marginBottom: 8 }}>{title}</Text>
+      <Text style={{ color: t.muted, fontSize: 16, lineHeight: 24, marginBottom: 20 }}>{lead}</Text>
+    </View>
+  );
 
-  // ---------- the tabs ----------
-  const songsView = (
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 60 }}>
-      <View style={card}>
-        <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Download from Apple Music</Text>
-        <Text style={{ color: t.muted, fontSize: 12, marginTop: 3, marginBottom: 10 }}>
-          Paste a song link. A browser screen opens, does the steps for you, and the file lands in Downloads.
+  const pickerBox = (labelText, valueText, onPress) => (
+    <View>
+      <Text style={labelStyle}>{labelText}</Text>
+      <TouchableOpacity onPress={onPress} activeOpacity={0.8} style={[field, { flexDirection: 'row', alignItems: 'center' }]}>
+        <Text style={{ color: t.text, fontSize: 16, flex: 1 }} numberOfLines={1}>
+          {valueText}
         </Text>
+        <Ionicons name="chevron-down" size={18} color={t.muted} />
+      </TouchableOpacity>
+    </View>
+  );
+
+  const linkButton = (key, labelText, sub, url, hi) => (
+    <TouchableOpacity
+      key={key}
+      activeOpacity={0.85}
+      onPress={() => openInApp(url)}
+      style={{
+        padding: 13,
+        borderRadius: 12,
+        marginTop: 8,
+        borderWidth: 1,
+        borderColor: hi ? t.accent : line,
+        backgroundColor: hi ? t.accent : line,
+      }}
+    >
+      <Text style={{ fontSize: 16, fontWeight: '600', color: hi ? t.onAccent : t.text }}>{labelText}</Text>
+      <Text style={{ fontSize: 13, marginTop: 2, color: hi ? t.onAccent : t.muted, opacity: hi ? 0.85 : 1 }}>{sub}</Text>
+    </TouchableOpacity>
+  );
+
+  // ---------- the pages ----------
+  const songsPage = (
+    <View>
+      <Heading
+        eyebrow="Apple Music"
+        title="Download"
+        lead="Paste a song link, tap Download. It is grabbed in the background and saved to your Music folder."
+      />
+      <View style={panel}>
+        <Text style={labelStyle}>Apple Music song link</Text>
         <TextInput
           value={link}
           onChangeText={setLink}
@@ -414,122 +515,129 @@ export default function FinderScreen() {
           placeholderTextColor={t.muted}
           autoCapitalize="none"
           autoCorrect={false}
-          style={input}
+          spellCheck={false}
+          style={field}
         />
-        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-          <Btn
-            t={t}
-            icon="clipboard-outline"
-            label="Paste"
-            alt
-            style={{ flex: 1 }}
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+          <TouchableOpacity
+            style={ghostBtn}
+            activeOpacity={0.8}
             onPress={async () => {
               try {
                 setLink(await Clipboard.getStringAsync());
               } catch (e) {
-                setLog([{ k: 'bad', m: 'Clipboard blocked. Paste it by hand.' }]);
+                setLog([{ k: 'bad', m: 'Clipboard blocked, paste it by hand.' }]);
               }
             }}
-          />
-          <Btn
-            t={t}
-            icon="close"
-            label="Clear"
-            alt
-            style={{ flex: 1 }}
+          >
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }}>Paste</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={ghostBtn}
+            activeOpacity={0.8}
             onPress={() => {
               setLink('');
               setLog([]);
             }}
-          />
+          >
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }}>Clear</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[goBtn(busy), { flex: 2 }]} activeOpacity={0.85} disabled={busy} onPress={startDownload}>
+            <Text style={goText}>Download</Text>
+          </TouchableOpacity>
         </View>
-        <Btn t={t} icon="download" label={busy ? 'Starting...' : 'Download'} disabled={busy} style={{ marginTop: 8 }} onPress={() => startDownload(link)} />
-        {log.map((x, i) => (
-          <Text key={i} style={{ marginTop: 8, fontSize: 13, color: x.k === 'bad' ? '#F2625A' : x.k === 'good' ? '#34D67A' : t.muted }}>
-            {x.m}
-          </Text>
-        ))}
+        <View style={{ marginTop: 12 }}>
+          {log.map((x, i) => (
+            <Text key={i} style={{ fontSize: 13, lineHeight: 21, color: x.k === 'bad' ? '#ff453a' : x.k === 'good' ? '#34c759' : t.muted }}>
+              {x.m}
+            </Text>
+          ))}
+        </View>
       </View>
 
-      <View style={card}>
-        <Text style={{ color: t.text, fontSize: 16, fontWeight: '800', marginBottom: 10 }}>Find a song</Text>
+      <View style={panel}>
+        <Text style={labelStyle}>Song or artist</Text>
         <TextInput
           value={songQ}
           onChangeText={setSongQ}
-          placeholder="Song or artist"
+          placeholder="e.g. Tiffany"
           placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchSongs()}
-          style={input}
+          autoCorrect={false}
+          style={field}
         />
-        <Btn t={t} icon="search" label="Search" style={{ marginTop: 10 }} onPress={() => searchSongs()} />
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchSongs()}>
+          <Text style={goText}>Search</Text>
+        </TouchableOpacity>
       </View>
 
       {songs === null && songMsg ? (
-        <View style={{ alignItems: 'center', padding: 20 }}>
+        <View style={{ alignItems: 'center', padding: 24 }}>
           <ActivityIndicator color={t.accent} />
+          <Text style={{ color: t.muted, marginTop: 10 }}>{songMsg}</Text>
         </View>
       ) : null}
-      {songs && songs.length === 0 && songMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 16 }}>{songMsg}</Text> : null}
+      {songs && songs.length === 0 && songMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 28 }}>{songMsg}</Text> : null}
       {songs
         ? songs.map((s) => (
             <TouchableOpacity
               key={s.id}
-              activeOpacity={0.8}
-              onPress={() => Linking.openURL(s.apple).catch(() => {})}
-              style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}
+              activeOpacity={0.85}
+              onPress={() => openInApp(s.apple)}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 12,
+                backgroundColor: t.card,
+                borderWidth: 1,
+                borderColor: line,
+                borderRadius: 14,
+                padding: 10,
+                marginBottom: 10,
+              }}
             >
-              <Image source={{ uri: s.art }} style={{ width: 56, height: 56, borderRadius: 10, backgroundColor: t.card }} />
-              <View style={{ flex: 1, marginHorizontal: 12 }}>
-                <Text style={{ color: t.text, fontSize: 15, fontWeight: '700' }} numberOfLines={1}>
+              <Image source={{ uri: s.art }} style={{ width: 60, height: 60, borderRadius: 8, backgroundColor: line }} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={{ color: t.text, fontWeight: '700' }} numberOfLines={1}>
                   {s.title}
                 </Text>
-                <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }} numberOfLines={1}>
-                  {s.artist}
-                  {s.album ? ' · ' + s.album : ''}
+                <Text style={{ color: t.muted, fontSize: 14, marginTop: 2 }} numberOfLines={1}>
+                  {s.artist + ' • ' + s.album}
                 </Text>
               </View>
               {s.preview ? (
-                <TouchableOpacity onPress={() => togglePreview(s)} style={{ padding: 8 }}>
-                  <Ionicons name={playingId === s.id ? 'pause-circle' : 'play-circle'} size={32} color={t.accent} />
+                <TouchableOpacity
+                  onPress={() => togglePreview(s)}
+                  activeOpacity={0.8}
+                  style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: line }}
+                >
+                  <Text style={{ color: t.text, fontWeight: '600', fontSize: 14 }}>{playingId === s.id ? 'Stop' : 'Preview'}</Text>
                 </TouchableOpacity>
               ) : null}
-              <TouchableOpacity onPress={() => getSong(s)} style={{ padding: 8 }}>
-                <Ionicons name="download" size={26} color={t.text} />
-              </TouchableOpacity>
             </TouchableOpacity>
           ))
         : null}
-    </ScrollView>
+    </View>
   );
 
-  const coversView = (
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 60 }}>
-      <View style={card}>
-        <Text style={label}>Media</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-          {ENTITIES.map((e) => (
-            <TouchableOpacity
-              key={e[0]}
-              onPress={() => setEntity(e[0])}
-              style={{
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                borderRadius: 18,
-                marginRight: 8,
-                backgroundColor: entity === e[0] ? t.accent : t.track,
-              }}
-            >
-              <Text style={{ fontWeight: '700', fontSize: 13, color: entity === e[0] ? t.onAccent : t.text }}>{e[1]}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-        <Text style={label}>Region</Text>
-        <TouchableOpacity onPress={() => setRegionOpen(true)} style={[input, { flexDirection: 'row', alignItems: 'center' }]}>
-          <Text style={{ color: t.text, fontSize: 15, flex: 1 }}>{regionName}</Text>
-          <Ionicons name="chevron-down" size={18} color={t.muted} />
-        </TouchableOpacity>
-        <Text style={label}>{entity === 'id' || entity === 'idAlbum' ? 'Apple ID' : 'Search'}</Text>
+  const coversPage = (
+    <View>
+      <Heading
+        eyebrow="iTunes Artwork Finder"
+        title="Album Cover"
+        lead="Same method as the real artwork finder: standard and uncompressed covers."
+      />
+      <View style={panel}>
+        {pickerBox('Media', (ENTITIES.find((e) => e.code === entity) || {}).name || entity, () => {
+          setPickerQ('');
+          setPicker({ title: 'Media', items: ENTITIES, value: entity, onPick: setEntity, search: false });
+        })}
+        {pickerBox('Region', (COUNTRIES.find((c) => c.code === region) || {}).name || region.toUpperCase(), () => {
+          setPickerQ('');
+          setPicker({ title: 'Region', items: COUNTRIES, value: region, onPick: setRegion, search: true });
+        })}
+        <Text style={labelStyle}>Search</Text>
         <TextInput
           value={coverQ}
           onChangeText={setCoverQ}
@@ -537,194 +645,200 @@ export default function FinderScreen() {
           placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchCovers()}
-          style={input}
+          autoCorrect={false}
+          style={field}
         />
-        <Btn t={t} icon="image" label="Get the artwork" style={{ marginTop: 10 }} onPress={() => searchCovers()} />
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchCovers()}>
+          <Text style={goText}>Get the artwork</Text>
+        </TouchableOpacity>
       </View>
 
       {covers === null && coverMsg ? (
-        <View style={{ alignItems: 'center', padding: 20 }}>
+        <View style={{ alignItems: 'center', padding: 24 }}>
           <ActivityIndicator color={t.accent} />
+          <Text style={{ color: t.muted, marginTop: 10 }}>{coverMsg}</Text>
         </View>
       ) : null}
-      {covers && covers.length === 0 && coverMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 16 }}>{coverMsg}</Text> : null}
-      {covers
-        ? covers.map((d, i) => (
-            <View key={i} style={card}>
-              <View style={{ flexDirection: 'row' }}>
-                <Image source={{ uri: d.url }} style={{ width: 110, height: 110, borderRadius: 12, backgroundColor: t.track }} />
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={{ color: t.text, fontSize: 15, fontWeight: '800' }} numberOfLines={4}>
-                    {d.title}
-                  </Text>
-                  {d.uncompressed ? <Text style={{ color: t.muted, fontSize: 12, marginTop: 4 }}>Uncompressed 3000 x 3000 available</Text> : null}
+      {covers && covers.length === 0 && coverMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 28 }}>{coverMsg}</Text> : null}
+      {covers && covers.length > 0 ? (
+        <View>
+          <Text style={{ color: t.muted, fontSize: 13, lineHeight: 20, marginHorizontal: 2, marginTop: 4, marginBottom: 18 }}>
+            Tap a button to open the image, then press and hold it to download. If the item is not on iTunes, this tool will not find it.
+          </Text>
+          {covers.map((d, i) => (
+            <View key={i} style={{ backgroundColor: t.card, borderWidth: 1, borderColor: line, borderRadius: 18, padding: 12, marginBottom: 16 }}>
+              <CoverImage uri={d.url} t={t} />
+              <Text style={{ color: t.text, fontSize: 18, fontWeight: '700', marginTop: 12, marginHorizontal: 4, marginBottom: 10, lineHeight: 24 }}>
+                {d.title}
+              </Text>
+              {isAppEntity ? (
+                <View>
+                  {linkButton('icon', 'App icon', '1024 × 1024', d.url, true)}
+                  {d.appstore ? linkButton('store', 'View on the App Store', 'Opens the store page', d.appstore, false) : null}
                 </View>
-              </View>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-                {d.appstore ? (
-                  <Btn t={t} icon="logo-apple-appstore" label="App Store page" alt onPress={() => Linking.openURL(d.appstore).catch(() => {})} />
-                ) : null}
-                <Btn
-                  t={t}
-                  icon="download"
-                  label="Standard 600x600"
-                  alt
-                  disabled={saving === d.url}
-                  onPress={() => saveCover(d.url, d.title, 'standard')}
-                />
-                <Btn
-                  t={t}
-                  icon="download"
-                  label={d.uncompressed ? 'Uncompressed' : 'High resolution'}
-                  disabled={saving === (d.uncompressed || d.hires)}
-                  onPress={() => saveCover(d.uncompressed || d.hires, d.title, d.uncompressed ? 'uncompressed' : 'high')}
-                />
-                <Btn t={t} icon="copy-outline" label="Copy link" alt onPress={() => copy(d.uncompressed || d.hires)} />
-              </View>
+              ) : (
+                <View>
+                  {linkButton('std', 'Standard Resolution', '600 × 600', d.url, false)}
+                  {d.uncompressed ? (
+                    <View>
+                      {linkButton('unc', 'Uncompressed High Resolution', 'Full quality, 3000 × 3000 (large file)', d.uncompressed, true)}
+                      <TouchableOpacity onPress={() => copyLink(d.uncompressed)} activeOpacity={0.7} style={{ padding: 10, alignItems: 'center', marginTop: 4 }}>
+                        <Text style={{ color: t.muted, fontSize: 14 }}>{copied === d.uncompressed ? 'Copied' : 'Copy uncompressed link'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    linkButton('hi', 'High Resolution', 'Largest version available', d.hires, true)
+                  )}
+                </View>
+              )}
             </View>
-          ))
-        : null}
-    </ScrollView>
+          ))}
+        </View>
+      ) : null}
+    </View>
   );
 
-  const lyricsView = (
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
-      <View style={card}>
-        <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Search lyrics</Text>
-        <Text style={{ color: t.muted, fontSize: 12, marginTop: 3, marginBottom: 10 }}>
-          Type a song or artist. The Lyricsify page opens right here.
-        </Text>
+  const lyricsPage = (
+    <View>
+      <Heading
+        eyebrow="Lyricsify"
+        title="Search Lyrics"
+        lead="Type a song or artist. The real Lyricsify page opens right inside the app."
+      />
+      <View style={panel}>
+        <Text style={labelStyle}>Song or artist</Text>
         <TextInput
           value={lyricQ}
           onChangeText={setLyricQ}
-          placeholder="Song or artist"
+          placeholder="e.g. Lil Nas X"
           placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchLyrics()}
-          style={input}
+          autoCorrect={false}
+          style={field}
         />
-        <Btn t={t} icon="search" label="Search" style={{ marginTop: 10 }} onPress={() => searchLyrics()} />
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchLyrics()}>
+          <Text style={goText}>Search</Text>
+        </TouchableOpacity>
       </View>
-    </ScrollView>
+      <Text style={{ color: t.muted, fontSize: 13, lineHeight: 20, marginHorizontal: 2 }}>
+        Use the close button on the top left of the opened page to come back here.
+      </Text>
+    </View>
   );
 
-  const automateView = (
-    <ScrollView contentContainerStyle={{ padding: 16 }}>
-      <View style={card}>
-        <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }}>Task Automator</Text>
-        <Text style={{ color: t.muted, fontSize: 12, marginTop: 3, marginBottom: 12 }}>
-          The engine behind the downloader. Open it to record your own steps, run them, or see everything it downloaded.
-        </Text>
-        <Btn
-          t={t}
-          icon="flash"
-          label="Open Task Automator"
-          onPress={() => (TA && TA.openHome ? TA.openHome() : Alert.alert('Not available', 'This needs the newest build of the app.'))}
-        />
-        <Btn
-          t={t}
-          icon="download"
-          label="Its downloads"
-          alt
-          style={{ marginTop: 8 }}
-          onPress={() => (TA && TA.openDownloads ? TA.openDownloads() : Alert.alert('Not available', 'This needs the newest build of the app.'))}
-        />
-      </View>
-    </ScrollView>
-  );
+  let page = songsPage;
+  if (tab === 'covers') page = coversPage;
+  else if (tab === 'lyrics') page = lyricsPage;
 
-  let content = songsView;
-  if (tab === 'covers') content = coversView;
-  else if (tab === 'lyrics') content = lyricsView;
-  else if (tab === 'automate') content = automateView;
+  const pickerItems = picker
+    ? picker.search && pickerQ.trim()
+      ? picker.items.filter((c) => c.name.toLowerCase().includes(pickerQ.trim().toLowerCase()) || c.code === pickerQ.trim().toLowerCase())
+      : picker.items
+    : [];
+
+  const menuItem = (key, icon, title, sub) => (
+    <TouchableOpacity
+      key={key}
+      activeOpacity={0.8}
+      onPress={() => DeviceEventEmitter.emit('openFinder', { tab: key })}
+      style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 13, paddingHorizontal: 12, borderRadius: 14 }}
+    >
+      <View style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: t.card, alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons name={icon} size={19} color={t.accent} />
+      </View>
+      <View style={{ marginLeft: 14, flex: 1 }}>
+        <Text style={{ color: t.text, fontSize: 16, fontWeight: '700' }}>{title}</Text>
+        <Text style={{ color: t.muted, fontSize: 12, marginTop: 1 }}>{sub}</Text>
+      </View>
+    </TouchableOpacity>
+  );
 
   return (
-    <Modal visible={open} animationType="slide" onRequestClose={lyricUrl ? () => setLyricUrl('') : close}>
-      {lyricUrl ? (
-        <Screen t={t} title="Lyricsify" onClose={() => setLyricUrl('')}>
-          <WebView source={{ uri: lyricUrl }} style={{ flex: 1, backgroundColor: t.bg }} startInLoadingState />
-        </Screen>
-      ) : (
-        <Screen t={t} title="Music Finder" onClose={close}>
-          <View style={{ flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 4 }}>
-            {TABS.map((x) => {
-              const on = tab === x.key;
-              return (
-                <TouchableOpacity
-                  key={x.key}
-                  onPress={() => {
-                    if (x.key !== 'songs') stopPreview();
-                    setTab(x.key);
-                  }}
-                  activeOpacity={0.8}
-                  style={{
-                    flex: 1,
-                    alignItems: 'center',
-                    paddingVertical: 9,
-                    borderRadius: 12,
-                    backgroundColor: on ? t.accent : t.card,
-                  }}
-                >
-                  <Ionicons name={x.icon} size={17} color={on ? t.onAccent : t.text} />
-                  <Text style={{ marginTop: 2, fontSize: 11, fontWeight: '800', color: on ? t.onAccent : t.text }}>{x.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
+    <View pointerEvents="box-none">
+      {/* the hamburger menu */}
+      <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
+        <View style={{ flex: 1, flexDirection: 'row' }}>
+          <View style={{ width: '80%', maxWidth: 340, backgroundColor: t.bg, paddingTop: insets.top + 16, paddingHorizontal: 12, paddingBottom: insets.bottom + 16 }}>
+            <Text style={{ color: t.text, fontSize: 22, fontWeight: '800', marginHorizontal: 12 }}>Menu</Text>
+            <Text style={{ color: t.accent, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', marginHorizontal: 12, marginTop: 22, marginBottom: 6 }}>
+              Music Finder
+            </Text>
+            {menuItem('songs', 'musical-notes', 'Songs', 'Download from Apple Music, find songs')}
+            {menuItem('covers', 'image', 'Covers', 'Standard and uncompressed album art')}
+            {menuItem('lyrics', 'document-text', 'Lyrics', 'Search Lyricsify')}
+            {menuItem('automate', 'flash', 'Automate', 'Open Task Automator')}
           </View>
-          {content}
-        </Screen>
-      )}
-
-      {/* hidden: plays the preview clips */}
-      <View style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }} pointerEvents="none">
-        <WebView
-          ref={previewRef}
-          originWhitelist={['*']}
-          source={{ html: '<html><body><audio id="a" preload="none"></audio></body></html>' }}
-          mediaPlaybackRequiresUserAction={false}
-          allowsInlineMediaPlayback
-          onMessage={() => setPlayingId(null)}
-        />
-      </View>
-
-      <Modal visible={regionOpen} animationType="fade" transparent onRequestClose={() => setRegionOpen(false)}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
-          <View style={{ backgroundColor: t.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '75%', padding: 16 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
-              <Text style={{ flex: 1, color: t.text, fontSize: 17, fontWeight: '800' }}>Region</Text>
-              <TouchableOpacity onPress={() => setRegionOpen(false)}>
-                <Ionicons name="close" size={26} color={t.text} />
-              </TouchableOpacity>
-            </View>
-            <TextInput
-              value={regionQ}
-              onChangeText={setRegionQ}
-              placeholder="Search a country"
-              placeholderTextColor={t.muted}
-              style={input}
-            />
-            <FlatList
-              data={filteredCountries}
-              keyExtractor={(c) => c.code}
-              keyboardShouldPersistTaps="handled"
-              style={{ marginTop: 8 }}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  onPress={() => {
-                    setRegion(item.code);
-                    setRegionOpen(false);
-                    setRegionQ('');
-                  }}
-                  style={{ paddingVertical: 13, flexDirection: 'row', alignItems: 'center' }}
-                >
-                  <Text style={{ flex: 1, color: t.text, fontSize: 15, fontWeight: item.code === region ? '800' : '500' }}>{item.name}</Text>
-                  {item.code === region ? <Ionicons name="checkmark" size={20} color={t.accent} /> : null}
-                </TouchableOpacity>
-              )}
-            />
-          </View>
+          <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' }} activeOpacity={1} onPress={() => setMenu(false)} />
         </View>
       </Modal>
-    </Modal>
+
+      {/* Music Finder */}
+      <Modal visible={open} animationType="slide" onRequestClose={close}>
+        <Screen t={t} title="Music Finder" onClose={close}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 30 }}>
+            {page}
+          </ScrollView>
+          <View style={{ flexDirection: 'row', backgroundColor: t.card, borderTopWidth: 1, borderTopColor: line }}>
+            {NAV.map((x) => (
+              <TouchableOpacity key={x.key} activeOpacity={0.7} onPress={() => goTab(x.key)} style={{ flex: 1, paddingVertical: 16, alignItems: 'center' }}>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: tab === x.key && x.key !== 'automate' ? t.accent : t.muted }}>{x.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </Screen>
+
+        {/* hidden: plays the preview clips */}
+        <View style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }} pointerEvents="none">
+          <WebView
+            ref={previewRef}
+            originWhitelist={['*']}
+            source={{ html: '<html><body><audio id="a" preload="none"></audio></body></html>' }}
+            mediaPlaybackRequiresUserAction={false}
+            allowsInlineMediaPlayback
+            onMessage={() => setPlayingId(null)}
+          />
+        </View>
+
+        <Modal visible={!!picker} animationType="fade" transparent onRequestClose={() => setPicker(null)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+            <View style={{ backgroundColor: t.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '75%', padding: 16 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={{ flex: 1, color: t.text, fontSize: 17, fontWeight: '800' }}>{picker ? picker.title : ''}</Text>
+                <TouchableOpacity onPress={() => setPicker(null)}>
+                  <Ionicons name="close" size={26} color={t.text} />
+                </TouchableOpacity>
+              </View>
+              {picker && picker.search ? (
+                <TextInput
+                  value={pickerQ}
+                  onChangeText={setPickerQ}
+                  placeholder="Search a country"
+                  placeholderTextColor={t.muted}
+                  style={[field, { marginBottom: 6 }]}
+                />
+              ) : null}
+              <FlatList
+                data={pickerItems}
+                keyExtractor={(c) => c.code}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    onPress={() => {
+                      picker.onPick(item.code);
+                      setPicker(null);
+                    }}
+                    style={{ paddingVertical: 13, flexDirection: 'row', alignItems: 'center' }}
+                  >
+                    <Text style={{ flex: 1, color: t.text, fontSize: 15, fontWeight: picker && item.code === picker.value ? '800' : '500' }}>{item.name}</Text>
+                    {picker && item.code === picker.value ? <Ionicons name="checkmark" size={20} color={t.accent} /> : null}
+                  </TouchableOpacity>
+                )}
+              />
+            </View>
+          </View>
+        </Modal>
+      </Modal>
+    </View>
   );
 }
