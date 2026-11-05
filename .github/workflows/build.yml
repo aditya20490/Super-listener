@@ -104,6 +104,7 @@ jobs:
             'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
             'android.permission.WAKE_LOCK',
             'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
+            'android.permission.INTERNET'
           ];
           cfg.expo.plugins = ['expo-media-library'];
           fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
