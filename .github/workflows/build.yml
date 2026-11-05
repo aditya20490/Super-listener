@@ -31,6 +31,18 @@ jobs:
           repository: ${{ github.repository_owner }}/audio-tag-editor
           path: old-tags
 
+      - name: Get the Music Finder code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/music-finder-app
+          path: old-finder
+
+      - name: Get the Task Automator code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/Task-automater
+          path: old-automator
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -57,6 +69,11 @@ jobs:
 
       - name: Add the Island row to the menu
         run: node patch-tools.js
+
+      - name: Pack the Music Finder data and link it into the player
+        run: |
+          node make-finder.js
+          node patch-finder.js
 
       - name: Create the app project
         run: |
@@ -116,6 +133,8 @@ jobs:
           GRADLE_PROPS='\norg.gradle.parallel=true\norg.gradle.caching=true\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g\n'
           # our own native parts (8D engine, file saver, Dynamic Island), copied into the Android project and registered
           add_native() {
+            # Music Finder: pulls the Task Automator engine into the Android project and registers its bridge
+            node ../link-finder.js || exit 1
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
             cp ../old-music/native-android/*.kt "$K/"
