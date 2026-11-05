@@ -1,6 +1,6 @@
 // Runs during the build, before the app is created. It only edits the build's own copies:
 //  - App.js (root): mounts the Music Finder screen next to the other tools
-//  - old-music/App.js: adds the "Find it online" card at the end of the song list
+//  - old-music/App.js: adds a hamburger menu button at the top left of the header
 // Your my-music-app repo is not changed.
 const fs = require('fs');
 
@@ -23,13 +23,17 @@ patch('App.js', [
   ['<FinderScreen />', '<MkaScreen />', '\n        <FinderScreen />', 'after'],
 ]);
 
+const menuButton =
+  "        <TouchableOpacity style={[s.headerBtn, { marginRight: 8 }]} onPress={() => require('react-native').DeviceEventEmitter.emit('openFinderMenu')}>\n" +
+  '          <Ionicons name="menu" size={24} color={t.text} />\n' +
+  '        </TouchableOpacity>\n';
+
 patch('old-music/App.js', [
-  ["import FinderCard", "import EditSong from './src/EditSong';", "\nimport FinderCard from './src/tools/FinderCard';", 'after'],
   [
-    'ListFooterComponent={<FinderCard',
-    "key={'songs-' + tab + '-' + columns}",
-    '\n        ListFooterComponent={<FinderCard query={query} />}',
-    'after',
+    "emit('openFinderMenu')",
+    '        <View style={{ flex: 1 }}>\n          <Text style={s.bigTitle}>My Music</Text>',
+    menuButton,
+    'before',
   ],
 ]);
 console.log('Music Finder linked into the build copies of App.js');
