@@ -39,8 +39,39 @@ for (const f of fs.readdirSync(TA + '/java/com/taskautomator')) {
   let text = fs.readFileSync(TA + '/java/com/taskautomator/' + f, 'utf8');
   text = text.replace(/^(package com\.taskautomator;)/m, '$1\n\nimport ' + ns + '.R;');
   text = text.replace(/R\.layout\.(\w+)/g, 'R.layout.ta_$1');
+  // keep the automator screens inside the status bar and above the keyboard, like they were in their own app
+  text = text.replace(/(setContentView\(R\.layout\.ta_\w+\);)/g, '$1\n        TaInsets.apply(this);');
   fs.writeFileSync(javaDst + '/' + f, text);
 }
+
+// 1b) the small helper that does it
+fs.writeFileSync(
+  javaDst + '/TaInsets.java',
+  [
+    'package com.taskautomator;',
+    '',
+    'import android.app.Activity;',
+    'import android.view.View;',
+    'import androidx.core.graphics.Insets;',
+    'import androidx.core.view.ViewCompat;',
+    'import androidx.core.view.WindowInsetsCompat;',
+    '',
+    '/** Newer Android draws apps under the status bar and keyboard. This puts the automator screens back where they were. */',
+    'public class TaInsets {',
+    '    public static void apply(Activity a) {',
+    '        final View root = a.findViewById(android.R.id.content);',
+    '        if (root == null) return;',
+    '        ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {',
+    '            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.ime());',
+    '            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);',
+    '            return WindowInsetsCompat.CONSUMED;',
+    '        });',
+    '        ViewCompat.requestApplyInsets(root);',
+    '    }',
+    '}',
+    '',
+  ].join('\n')
+);
 
 // 2) our bridge
 for (const f of ['TaskAutomatorModule.java', 'TaskAutomatorPackage.java']) {
