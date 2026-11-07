@@ -145,3 +145,6 @@ if (ma.indexOf('TaskAutomatorPackage') < 0) {
   fs.writeFileSync(mainApp, ma);
 }
 console.log('Task Automator linked into the app (package ' + ns + ')');
+
+// 8) the small native piece that keeps the listening-history file outside the app
+require('./link-persist.js');
