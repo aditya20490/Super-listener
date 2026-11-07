@@ -34,3 +34,6 @@ if (ma.indexOf('PersistentStorePackage') < 0) {
   fs.writeFileSync(mainApp, ma);
 }
 console.log('History backup storage linked into the app');
+
+// the audio editor's native engine is linked the same way
+require('./link-audioedit.js');
