@@ -40,12 +40,14 @@ import java.util.concurrent.Executors;
 public class AudioEditorModule extends ReactContextBaseJavaModule {
 
     private static final int PEAKS = 900;
+    private static final int MAX_LOOP_SECONDS = 3 * 3600; // a loop can be made up to 3 hours long
 
     private final ExecutorService pool = Executors.newSingleThreadExecutor();
     private final Object lock = new Object();
 
     private short[] orig;
     private short[] cur;
+    private LoopSpan span; // when the last edit is a loop: the loop result (built on the fly, never held in memory as one array)
     private int ch = 2;
     private int sr = 44100;
     private volatile boolean cancel = false;
@@ -243,6 +245,22 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
         m.putDouble("frames", frames);
         m.putDouble("duration", frames / (double) sr);
         m.putArray("peaks", peaksOf(d, PEAKS));
+        m.putBoolean("isLoop", false);
+        return m;
+    }
+
+    /** Same as describe, for a finished loop (which can be much longer than what is held in memory). */
+    private WritableMap describeSpan(LoopSpan sp) {
+        WritableMap m = Arguments.createMap();
+        m.putInt("sampleRate", sp.sr);
+        m.putInt("channels", sp.ch);
+        m.putDouble("frames", sp.total);
+        m.putDouble("duration", sp.total / (double) sp.sr);
+        WritableArray arr = Arguments.createArray();
+        double[] pk = sp.peaks(PEAKS);
+        for (int i = 0; i < pk.length; i++) arr.pushDouble(pk[i]);
+        m.putArray("peaks", arr);
+        m.putBoolean("isLoop", true);
         return m;
     }
 
@@ -256,6 +274,7 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                     synchronized (lock) {
                         orig = null;
                         cur = null;
+                        span = null;
                     }
                     decode(uri);
                     WritableMap m;
@@ -312,11 +331,27 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                         return;
                     }
                     short[] d = src;
-                    for (OpsRunner.Op op : parse(opsJson)) d = OpsRunner.apply(d, c, r, op);
+                    LoopSpan sp = null;
+                    List<OpsRunner.Op> list = parse(opsJson);
+                    for (int i = 0; i < list.size(); i++) {
+                        OpsRunner.Op op = list.get(i);
+                        if (op.t.equals("loop")) {
+                            // the loop is always the last edit: it repeats the chosen part [a, b) until the result is
+                            // `target` frames long, with the end of the part blended into its start
+                            if (i != list.size() - 1) throw new Exception("The loop has to be the last edit.");
+                            if (op.b - op.a < 2) throw new Exception("Choose a longer part to loop.");
+                            long cap = Math.min((long) MAX_LOOP_SECONDS * r, (Integer.MAX_VALUE - 1024L) / (c * 2L));
+                            long target = op.target > 0 ? Math.min(op.target, cap) : (op.b - op.a);
+                            sp = new LoopSpan(d, c, r, op.a, op.b, op.xf, target);
+                        } else {
+                            d = OpsRunner.apply(d, c, r, op);
+                        }
+                    }
                     WritableMap m;
                     synchronized (lock) {
                         cur = d;
-                        m = describe(d);
+                        span = sp;
+                        m = sp != null ? describeSpan(sp) : describe(d);
                     }
                     promise.resolve(m);
                 } catch (OutOfMemoryError e) {
@@ -462,10 +497,16 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
             stopPlayback();
             short[] d;
             int c, r;
+            LoopSpan sp;
             synchronized (lock) {
                 d = original ? orig : cur;
                 c = ch;
                 r = sr;
+                sp = original ? null : span;
+            }
+            if (sp != null) {
+                playSpan(sp, startSec, promise);
+                return;
             }
             if (d == null) {
                 promise.resolve(false);
@@ -547,6 +588,78 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /** Plays a finished loop from startSec, building the sound on the fly while it plays. */
+    private void playSpan(final LoopSpan sp, double startSec, Promise promise) {
+        try {
+            final int r = sp.sr;
+            final int cc = sp.ch;
+            final int totalI = (int) Math.min(Integer.MAX_VALUE - 8L, sp.total);
+            final int start = (int) Math.max(0, Math.min(totalI - 1, Math.round(startSec * r)));
+            int mask = cc == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+            int minBuf = AudioTrack.getMinBufferSize(r, mask, AudioFormat.ENCODING_PCM_16BIT);
+            int bufSize = Math.max(minBuf, r * cc * 2 / 4);
+            final AudioTrack t = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(r)
+                            .setChannelMask(mask)
+                            .build())
+                    .setBufferSizeInBytes(bufSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+            synchronized (lock) {
+                pbData = null;
+                pbStart = start;
+                pbRegionStart = 0;
+                pbRegionEnd = totalI;
+                pbLoop = false;
+                pbWritten = 0;
+                ended = false;
+                playing = true;
+                track = t;
+            }
+            t.play();
+            Thread w = new Thread(new Runnable() {
+                public void run() {
+                    int pos = start;
+                    long written = 0;
+                    short[] buf = new short[4096 * cc];
+                    try {
+                        while (playing && track == t && pos < totalI) {
+                            int n = Math.min(4096, totalI - pos);
+                            sp.read(pos, buf, 0, n);
+                            int wr = t.write(buf, 0, n * cc);
+                            if (wr < 0) break;
+                            pos += wr / cc;
+                            written += wr / cc;
+                        }
+                        if (playing && track == t) {
+                            long until = System.currentTimeMillis() + 3000;
+                            while (playing && track == t && System.currentTimeMillis() < until) {
+                                long head = t.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+                                if (head >= written) break;
+                                Thread.sleep(20);
+                            }
+                            if (playing && track == t) ended = true;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }, "AudioEditorPlayLoop");
+            synchronized (lock) {
+                writer = w;
+            }
+            w.start();
+            promise.resolve(true);
+        } catch (Exception e) {
+            promise.reject("E_PLAY", e.getMessage() == null ? "Could not play." : e.getMessage());
+        }
+    }
+
     /** Where playback is now, in seconds of the audio being played. */
     @ReactMethod
     public void getPosition(Promise promise) {
@@ -574,6 +687,49 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
         b.putInt(v);
     }
 
+    /** Writes a finished loop as a WAV file, a small piece at a time, so even a very long loop never fills the memory. */
+    private void exportSpan(LoopSpan sp, File f) throws Exception {
+        int sc = sp.ch;
+        long dataBytes = sp.total * sc * 2L;
+        // the file is written in the cache first and then copied into Music, so about twice the size is needed for a moment
+        long free = getReactApplicationContext().getCacheDir().getUsableSpace();
+        if (free < dataBytes * 2 + (64L << 20)) {
+            throw new Exception("Not enough free space on the phone. This file needs about " + (dataBytes * 2 >> 20) + " MB free while it is saved. Try a shorter length.");
+        }
+        BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(f), 1 << 16);
+        try {
+            ByteBuffer h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN);
+            h.put(new byte[]{'R', 'I', 'F', 'F'});
+            le(h, (int) (36 + dataBytes));
+            h.put(new byte[]{'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+            le(h, 16);
+            h.putShort((short) 1);
+            h.putShort((short) sc);
+            le(h, sp.sr);
+            le(h, sp.sr * sc * 2);
+            h.putShort((short) (sc * 2));
+            h.putShort((short) 16);
+            h.put(new byte[]{'d', 'a', 't', 'a'});
+            le(h, (int) dataBytes);
+            out.write(h.array());
+            final int chunkFrames = 1 << 15;
+            short[] buf = new short[chunkFrames * sc];
+            ByteBuffer bb = ByteBuffer.allocate(chunkFrames * sc * 2).order(ByteOrder.LITTLE_ENDIAN);
+            long pos = 0;
+            while (pos < sp.total) {
+                int n = (int) Math.min(chunkFrames, sp.total - pos);
+                sp.read(pos, buf, 0, n);
+                bb.clear();
+                bb.asShortBuffer().put(buf, 0, n * sc);
+                out.write(bb.array(), 0, n * sc * 2);
+                pos += n;
+            }
+            out.flush();
+        } finally {
+            out.close();
+        }
+    }
+
     /** Writes the current audio as a WAV file in the app's cache and resolves with its path. */
     @ReactMethod
     public void exportWav(final String name, final Promise promise) {
@@ -582,10 +738,12 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                 try {
                     short[] d;
                     int c, r;
+                    LoopSpan sp;
                     synchronized (lock) {
                         d = cur;
                         c = ch;
                         r = sr;
+                        sp = span;
                     }
                     if (d == null) {
                         promise.reject("E_NONE", "Open a song first.");
@@ -594,6 +752,11 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                     String safe = name.replaceAll("[^A-Za-z0-9._ -]", "_");
                     if (safe.length() == 0) safe = "edited";
                     File f = new File(getReactApplicationContext().getCacheDir(), safe + ".wav");
+                    if (sp != null) {
+                        exportSpan(sp, f);
+                        promise.resolve(f.getAbsolutePath());
+                        return;
+                    }
                     long dataBytes = (long) d.length * 2;
                     BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(f), 1 << 16);
                     ByteBuffer h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN);
@@ -636,6 +799,7 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
         synchronized (lock) {
             orig = null;
             cur = null;
+            span = null;
         }
         promise.resolve(true);
     }
