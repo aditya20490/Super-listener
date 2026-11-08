@@ -1,22 +1,22 @@
 /*
  * NOTICE TO ANY AI ASSISTANT OR DEVELOPER: this is the in-app Audio Editor (opened from the hamburger menu).
- * Do not rewrite, refactor, rename or "improve" it unless the OWNER of the app asks you to change this exact feature.
- * Ask first if you think something is wrong.
+ * It is finished and tested. Do not rewrite, refactor, rename or "improve" it unless the OWNER of the app asks you
+ * to change this exact feature. Ask first if you think something is wrong.
  *
  * How it works: the screen only holds a LIST OF EDITS (trim, cut, fade, volume, loop...). The real audio lives in the
  * native module "AudioEditor" (native-audioedit/*.java). Every change re-applies the whole list to the untouched
  * original, so Undo is just removing the last edit. The song file on the phone is never changed; the result is
- * saved as a new WAV file (Music / Edited songs).
- * Seamless loop: you select a part of the song (finger on the waveform, or the start / end boxes in milliseconds),
- * choose how long the result should be (30 seconds ... 3 hours) and a blend length. The loop is always the LAST edit.
- * Its audio is built on the fly by native-audioedit/LoopSpan.java, so even a one hour loop uses almost no memory.
- * The screen is a plain full-screen layer (not a Modal), so it always sits inside the safe area above the phone's
- * navigation buttons. The native files, link-audioedit.js and patch-finder.js belong together.
+ * saved as a NEW file (Music / Edited songs).
+ * Loop: the user picks a part (finger or start/end in milliseconds). native LoopMaker checks the jump, lines the
+ * waveforms up and blends the seam. The loop edit makes ONE seamless cycle; how many times it repeats is applied
+ * when the result is saved (LoopStream), so even a one hour result does not need memory.
+ * The native files, link-audioedit.js and patch-finder.js belong together. Do not change one without the others.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
+  Modal,
   TouchableOpacity,
   TextInput,
   ScrollView,
@@ -26,95 +26,90 @@ import {
   DeviceEventEmitter,
   Alert,
   ActivityIndicator,
-  BackHandler,
-  Keyboard,
   useWindowDimensions,
 } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Engine from '../audioEngine';
-import { useAppTheme } from './Tools';
-import { cleanTitle } from '../utils';
-import { saveFile, FileSystem } from './saver';
+import { Screen, Btn, useAppTheme } from './Tools';
+import { saveFile } from './saver';
 
 const AE = NativeModules ? NativeModules.AudioEditor : null;
 
-const WAVE_H = 190;
-const MAX_LOOP_SEC = 3 * 3600;
-
-function pad2(n) {
-  return n < 10 ? '0' + n : String(n);
-}
-
-// 1:05.3  (or 1:02:03 for long audio)
 function fmt(sec) {
   if (!isFinite(sec) || sec < 0) sec = 0;
-  if (sec >= 3600) {
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec - h * 3600) / 60);
-    const s = Math.floor(sec - h * 3600 - m * 60);
-    return h + ':' + pad2(m) + ':' + pad2(s);
-  }
-  const tenths = Math.round(sec * 10);
-  const m = Math.floor(tenths / 600);
-  const s = (tenths % 600) / 10;
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
   return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
 }
 
-// 1:05.300 (minutes, seconds and milliseconds) for the start / end boxes
-function fmtMs(sec) {
-  if (!isFinite(sec) || sec < 0) sec = 0;
-  const total = Math.round(sec * 1000);
-  const h = Math.floor(total / 3600000);
-  const m = Math.floor((total % 3600000) / 60000);
-  const s = Math.floor((total % 60000) / 1000);
-  const ms = total % 1000;
-  const msText = ms < 10 ? '00' + ms : ms < 100 ? '0' + ms : String(ms);
-  return (h > 0 ? h + ':' + pad2(m) : String(m)) + ':' + pad2(s) + '.' + msText;
+function fmtLong(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return (h > 0 ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (s < 10 ? '0' : '') + s;
 }
 
-// "1:05.300", "65.3" or "1:02:03.5" -> seconds (null if it makes no sense)
-function parseTime(text) {
-  const x = String(text || '')
-    .trim()
-    .replace(',', '.');
-  if (!x) return null;
-  const parts = x.split(':');
-  if (parts.length > 3) return null;
-  let sec = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const n = parseFloat(parts[i]);
-    if (!isFinite(n) || n < 0) return null;
-    sec = sec * 60 + n;
-  }
-  return sec;
+function mbText(bytes) {
+  const mb = bytes / 1048576;
+  return mb >= 1000 ? (mb / 1024).toFixed(1) + ' GB' : Math.max(1, Math.round(mb)) + ' MB';
 }
 
-function fmtSize(bytes) {
-  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-  return Math.max(1, Math.round(bytes / (1024 * 1024))) + ' MB';
+function cleanTitle(name) {
+  return String(name || '')
+    .replace(/\.[A-Za-z0-9]{2,5}$/, '')
+    .replace(/_/g, ' ')
+    .trim();
 }
 
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
+function qualityLabel(q) {
+  if (q >= 75) return 'Excellent';
+  if (q >= 55) return 'Good';
+  if (q >= 35) return 'Fair';
+  return 'Rough';
 }
+
+function qualityColor(q) {
+  if (q >= 75) return '#34c759';
+  if (q >= 55) return '#9acd32';
+  if (q >= 35) return '#ffb020';
+  return '#ff6b5e';
+}
+
+function opLabel(o) {
+  const names = {
+    trim: 'Trim',
+    cut: 'Cut',
+    fadeIn: 'Fade in',
+    fadeOut: 'Fade out',
+    gain: 'Volume ' + (o.db > 0 ? '+' : '') + o.db + ' dB',
+    normalize: 'Normalize',
+    silence: 'Silence',
+    reverse: 'Reverse',
+    speed: 'Speed ' + o.factor + 'x',
+    loop: 'Loop x' + (o.loops || 1),
+  };
+  return names[o.t] || o.t;
+}
+
+const LOOP_LENGTHS = [
+  [30, '30 s'],
+  [60, '1 min'],
+  [300, '5 min'],
+  [600, '10 min'],
+  [1800, '30 min'],
+  [3600, '1 hour'],
+  [7200, '2 hours'],
+];
 
 export default function AudioEditorScreen() {
   const [open, setOpen] = useState(false);
   const t = useAppTheme(open);
-  const insets = useSafeAreaInsets();
-  const win = useWindowDimensions();
-
-  // song picker (a card inside the editor)
-  const [pickOpen, setPickOpen] = useState(false);
-  const [lib, setLib] = useState([]);
-  const [libLoading, setLibLoading] = useState(false);
-  const [q, setQ] = useState('');
-  const pickedAt = useRef(0);
+  const { height: winH } = useWindowDimensions();
 
   const [song, setSong] = useState(null);
-  const [info, setInfo] = useState(null); // { duration, sampleRate, channels, frames, peaks, isLoop }
+  const [info, setInfo] = useState(null); // { duration, sampleRate, channels }
   const [loading, setLoading] = useState('');
   const [busy, setBusy] = useState('');
   const [ops, setOps] = useState([]);
@@ -125,130 +120,94 @@ export default function AudioEditorScreen() {
   const [loopOn, setLoopOn] = useState(false);
   const [useOriginal, setUseOriginal] = useState(false);
   const [width, setWidth] = useState(300);
+  const [overW, setOverW] = useState(200);
+  const [view, setView] = useState({ start: 0, end: 1 });
+  const [peaks, setPeaks] = useState([]);
+  const [editing, setEditing] = useState(null); // 'start' | 'end' while typing
+  const [typed, setTyped] = useState('');
 
-  const [panel, setPanel] = useState(null); // 'loop' | 'volume' | 'speed' | 'export'
+  const [panel, setPanel] = useState(null); // 'choose' | 'loop' | 'volume' | 'speed' | 'export'
+  const [songs, setSongs] = useState(null);
+  const [query, setQuery] = useState('');
+
+  // loop settings
+  const [loopAlign, setLoopAlign] = useState(true);
+  const [loopXf, setLoopXf] = useState(0);
+  const [loopFor, setLoopFor] = useState(60);
+  const [loopCustom, setLoopCustom] = useState('');
+  const [loopFade, setLoopFade] = useState(false);
+  const [check, setCheck] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [checkErr, setCheckErr] = useState('');
+  const [loopPlaying, setLoopPlaying] = useState(false);
+
+  // saving
   const [exportName, setExportName] = useState('');
+  const [format, setFormat] = useState('m4a');
+  const [saving, setSaving] = useState(false);
+  const [prog, setProg] = useState({ f: 0, stage: '' });
 
-  // seamless loop settings
-  const [startTxt, setStartTxt] = useState('');
-  const [endTxt, setEndTxt] = useState('');
-  const [lh, setLh] = useState('0');
-  const [lm, setLm] = useState('5');
-  const [ls, setLs] = useState('0');
-  const [xfSec, setXfSec] = useState(0); // 0 = automatic
-  const [prevLoop, setPrevLoop] = useState(false);
-
-  const [kbPad, setKbPad] = useState(0);
-  const [colH, setColH] = useState(0); // height of the editor column (shrinks when the keyboard is up)
-  const [upH, setUpH] = useState(0);
-  const [upContentH, setUpContentH] = useState(0);
-
-  const rootRef = useRef(null);
   const geo = useRef({});
   const drag = useRef({ x0: 0, mode: 'new', moved: false });
-  const prevRef = useRef(false);
-  const editing = useRef({ s: false, e: false });
+  const ovDrag = useRef({ x0: 0, vs: 0 });
+  const openedAt = useRef(0);
 
   const dur = info ? info.duration : 0;
-  const selValid = !!sel && sel.end - sel.start > 0.02;
-  const hasLoop = ops.some((o) => o.t === 'loop');
+  const selValid = !!(sel && sel.end - sel.start > 0.02);
+  const span = Math.max(0.05, view.end - view.start);
+  const lastLoop = ops.slice().reverse().find((o) => o.t === 'loop') || null;
+  const repeat = lastLoop ? { loops: lastLoop.loops || 1, fade: lastLoop.fadeOut || 0 } : { loops: 1, fade: 0 };
 
-  // ---------- opening ----------
+  // ---------- opening and closing ----------
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('openAudioEditor', () => setOpen(true));
     return () => sub.remove();
   }, []);
-
-  // keep the bottom panel above the keyboard, whether or not Android already resized the screen
-  useEffect(() => {
-    if (!open) return undefined;
-    const show = Keyboard.addListener('keyboardDidShow', (e) => {
-      const top = e && e.endCoordinates ? e.endCoordinates.screenY : 0;
-      if (!top || !rootRef.current || !rootRef.current.measureInWindow) return;
-      rootRef.current.measureInWindow((x, y, w, h) => {
-        const over = y + h - top;
-        setKbPad(over > 1 ? over : 0);
-      });
-    });
-    const hide = Keyboard.addListener('keyboardDidHide', () => setKbPad(0));
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, [open]);
 
   const stopPlay = async () => {
     try {
       if (AE) await AE.stop();
     } catch (e) {}
     setPlaying(false);
-  };
-
-  // leaves the loop preview and puts the editor's audio back to the real edit list
-  const endPreview = async () => {
-    if (!prevRef.current) return;
-    prevRef.current = false;
-    setPrevLoop(false);
-    await stopPlay();
-    try {
-      await AE.render(JSON.stringify(ops));
-    } catch (e) {}
+    setLoopPlaying(false);
   };
 
   const close = async () => {
-    prevRef.current = false;
     await stopPlay();
     try {
-      if (AE) await AE.release();
+      if (AE) {
+        await AE.release();
+        await AE.clearExports();
+      }
     } catch (e) {}
     setOpen(false);
-    setPickOpen(false);
     setSong(null);
     setInfo(null);
     setOps([]);
     setRedo([]);
     setSel(null);
     setPanel(null);
-    setPrevLoop(false);
-    setPos(0);
-    Keyboard.dismiss();
+    setCheck(null);
+  };
+
+  const openPanel = async (name) => {
+    if (name !== 'choose' && !info) return;
+    await stopPlay();
+    openedAt.current = Date.now();
+    setPanel(name);
   };
 
   const closePanel = async () => {
-    Keyboard.dismiss();
-    await endPreview();
+    if (saving) return;
+    await stopPlay();
     setPanel(null);
   };
 
-  useEffect(() => {
-    if (!open) return undefined;
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (pickOpen) {
-        setPickOpen(false);
-        return true;
-      }
-      if (panel) {
-        closePanel();
-        return true;
-      }
-      close();
-      return true;
-    });
-    return () => sub.remove();
-  }, [open, pickOpen, panel, ops]);
-
   // ---------- choosing a song ----------
-  const openPicker = () => {
-    pickedAt.current = Date.now();
-    setQ('');
-    setPickOpen(true);
-  };
-
   useEffect(() => {
-    if (!pickOpen) return undefined;
+    if (panel !== 'choose' || songs) return undefined;
     let alive = true;
     (async () => {
-      setLibLoading(true);
       try {
         const perm = await MediaLibrary.getPermissionsAsync();
         if (!perm.granted) await MediaLibrary.requestPermissionsAsync();
@@ -262,51 +221,40 @@ export default function AudioEditorScreen() {
           more = p.hasNextPage;
         }
         const list = all
-          .map((a) => ({ id: String(a.id), uri: a.uri, filename: a.filename || '', title: cleanTitle(a.filename || '') }))
+          .map((a) => ({ id: String(a.id), uri: a.uri, filename: a.filename || '', title: cleanTitle(a.filename || ''), duration: a.duration || 0 }))
           .sort((a, b) => (a.title.toLowerCase() < b.title.toLowerCase() ? -1 : 1));
-        if (alive) setLib(list);
-      } catch (e) {}
-      if (alive) setLibLoading(false);
+        if (alive) setSongs(list);
+      } catch (e) {
+        if (alive) setSongs([]);
+      }
     })();
     return () => {
       alive = false;
     };
-  }, [pickOpen]);
-
-  const shown = useMemo(() => {
-    const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
-    return lib.filter((it) => tokens.every((k) => (it.title + ' ' + it.filename).toLowerCase().indexOf(k) >= 0)).slice(0, 300);
-  }, [lib, q]);
+  }, [panel]);
 
   const loadSong = async (item) => {
-    setPickOpen(false);
-    Keyboard.dismiss();
-    prevRef.current = false;
-    setPrevLoop(false);
+    if (Date.now() - openedAt.current < 450) return; // ignore the tap that opened this list
+    setPanel(null);
     await stopPlay();
     setSong(item);
     setInfo(null);
     setOps([]);
     setRedo([]);
     setSel(null);
-    setPanel(null);
     setPos(0);
+    setCheck(null);
     setExportName(String(item.title || 'song') + ' (edited)');
     setLoading('Opening the song…');
     try {
       const r = await AE.open(item.uri);
       setInfo(r);
+      setView({ start: 0, end: r.duration });
     } catch (e) {
       Alert.alert('Could not open this song', e && e.message ? e.message : 'Try another song.');
       setSong(null);
     }
     setLoading('');
-  };
-
-  const pickSong = (item) => {
-    // ignore a touch that is still left over from opening the card
-    if (Date.now() - pickedAt.current < 450) return;
-    loadSong(item);
   };
 
   // ---------- the edit list ----------
@@ -315,6 +263,7 @@ export default function AudioEditorScreen() {
     try {
       const r = await AE.render(JSON.stringify(list));
       setInfo(r);
+      setView({ start: 0, end: r.duration });
       setSel(null);
       return true;
     } catch (e) {
@@ -326,7 +275,6 @@ export default function AudioEditorScreen() {
   };
 
   const pushOp = async (op) => {
-    await endPreview();
     await stopPlay();
     const next = ops.concat([op]);
     if (await applyList(next)) {
@@ -340,7 +288,6 @@ export default function AudioEditorScreen() {
 
   const undo = async () => {
     if (ops.length === 0) return;
-    await endPreview();
     await stopPlay();
     const next = ops.slice(0, -1);
     if (await applyList(next)) {
@@ -352,7 +299,6 @@ export default function AudioEditorScreen() {
 
   const redoOp = async () => {
     if (redo.length === 0) return;
-    await endPreview();
     await stopPlay();
     const op = redo[redo.length - 1];
     const next = ops.concat([op]);
@@ -365,23 +311,52 @@ export default function AudioEditorScreen() {
 
   const needSel = () => {
     if (!selValid) {
-      Alert.alert('Select a part first', 'Drag across the waveform to choose the part.');
+      Alert.alert('Select a part first', 'Drag across the waveform, or type a start and end below it.');
       return false;
     }
     return true;
   };
 
-  // the loop is the last edit, so nothing else can be added after it
-  const guard = (fn) => () => {
-    if (!info) return;
-    if (hasLoop) {
-      Alert.alert('The loop is the last step', 'Undo the loop if you want to edit more.');
-      return;
-    }
-    fn();
+  const range = () => (selValid ? { from: sel.start, to: sel.end } : {});
+
+  // ---------- the waveform ----------
+  useEffect(() => {
+    if (!AE || !info) return undefined;
+    let alive = true;
+    const n = Math.max(30, Math.floor(width / 3));
+    AE.getPeaks(view.start, view.end, n, false)
+      .then((p) => {
+        if (alive) setPeaks(p);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [info, view.start, view.end, width]);
+
+  const clampView = (s, e) => {
+    const d = Math.max(0.05, dur);
+    let sp = Math.min(d, Math.max(0.5, e - s));
+    if (d < 0.5) sp = d;
+    let st = Math.max(0, Math.min(d - sp, s));
+    return { start: st, end: st + sp };
   };
 
-  const range = () => (selValid ? { from: sel.start, to: sel.end } : {});
+  const zoomIn = () => {
+    const c = selValid ? (sel.start + sel.end) / 2 : pos;
+    setView(clampView(c - span / 4, c + span / 4));
+  };
+  const zoomOut = () => {
+    const c = (view.start + view.end) / 2;
+    setView(clampView(c - span, c + span));
+  };
+  const zoomFit = () => setView({ start: 0, end: dur });
+
+  // keep the playhead in sight while playing
+  useEffect(() => {
+    if (!playing || !info) return;
+    if (pos > view.end || pos < view.start) setView(clampView(pos - span * 0.1, pos + span * 0.9));
+  }, [pos, playing]);
 
   // ---------- playback ----------
   const startPlay = async (from, orig) => {
@@ -391,10 +366,10 @@ export default function AudioEditorScreen() {
     } catch (e) {}
     const o = orig === undefined ? useOriginal : orig;
     try {
-      if (loopOn && selValid && !hasLoop) {
+      if (loopOn && selValid) {
         const s = Math.max(sel.start, Math.min(from, sel.end - 0.05));
         await AE.play(s, sel.end, sel.start, true, o);
-      } else if (loopOn && !hasLoop) {
+      } else if (loopOn) {
         await AE.play(from, -1, 0, true, o);
       } else {
         await AE.play(from, -1, 0, false, o);
@@ -406,10 +381,6 @@ export default function AudioEditorScreen() {
   };
 
   const togglePlay = async () => {
-    if (prevRef.current) {
-      await endPreview();
-      return;
-    }
     if (playing) {
       try {
         const p = await AE.stop();
@@ -426,23 +397,14 @@ export default function AudioEditorScreen() {
     const id = setInterval(async () => {
       try {
         const p = await AE.getPosition();
-        if (p.position >= 0 && !prevRef.current) setPos(p.position);
+        if (p.position >= 0) setPos(p.position);
         if (p.ended || !p.playing) setPlaying(false);
       } catch (e) {}
     }, 100);
     return () => clearInterval(id);
   }, [playing]);
 
-  // a loop preview that played to its end
-  useEffect(() => {
-    if (!playing && prevRef.current) endPreview();
-  }, [playing]);
-
   const seekTo = async (tm) => {
-    if (prevRef.current) {
-      await endPreview();
-      return;
-    }
     const tt = Math.max(0, Math.min(dur, tm));
     setPos(tt);
     if (playing) await startPlay(tt);
@@ -457,16 +419,8 @@ export default function AudioEditorScreen() {
     }
   };
 
-  // ---------- waveform touch ----------
-  geo.current = {
-    w: width,
-    dur: dur,
-    sel: selValid ? sel : null,
-    setSel: setSel,
-    seek: seekTo,
-    locked: hasLoop || !info,
-    endPrev: endPreview,
-  };
+  // ---------- touch on the waveform ----------
+  geo.current = { w: width, view: view, span: span, dur: dur, sel: selValid ? sel : null, setSel: setSel, seek: seekTo };
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -476,56 +430,92 @@ export default function AudioEditorScreen() {
         const g = geo.current;
         const x = e.nativeEvent.locationX;
         drag.current = { x0: x, mode: 'new', moved: false };
-        if (g.sel && g.dur > 0) {
-          const sx = (g.sel.start / g.dur) * g.w;
-          const ex = (g.sel.end / g.dur) * g.w;
-          const ds = Math.abs(x - sx);
-          const de = Math.abs(x - ex);
-          if (Math.min(ds, de) < 30) drag.current.mode = ds <= de ? 'start' : 'end';
+        if (g.sel) {
+          const sx = ((g.sel.start - g.view.start) / g.span) * g.w;
+          const ex = ((g.sel.end - g.view.start) / g.span) * g.w;
+          if (Math.abs(x - sx) < 26) drag.current.mode = 'start';
+          else if (Math.abs(x - ex) < 26) drag.current.mode = 'end';
         }
       },
       onPanResponderMove: (e, gs) => {
         const g = geo.current;
         const d = drag.current;
-        if (g.locked) return;
-        if (Math.abs(gs.dx) > 4 && !d.moved) {
-          d.moved = true;
-          if (prevRef.current) g.endPrev();
-        }
+        if (Math.abs(gs.dx) > 4) d.moved = true;
         if (!d.moved || g.dur <= 0) return;
         const x = Math.max(0, Math.min(g.w, d.x0 + gs.dx));
-        const tm = (x / g.w) * g.dur;
+        const tm = Math.max(0, Math.min(g.dur, g.view.start + (x / g.w) * g.span));
         if (d.mode === 'new') {
-          const a = (d.x0 / g.w) * g.dur;
+          const a = Math.max(0, Math.min(g.dur, g.view.start + (d.x0 / g.w) * g.span));
           g.setSel({ start: Math.min(a, tm), end: Math.max(a, tm) });
         } else if (d.mode === 'start' && g.sel) {
-          g.setSel({ start: Math.max(0, Math.min(tm, g.sel.end - 0.05)), end: g.sel.end });
+          g.setSel({ start: Math.min(tm, g.sel.end - 0.01), end: g.sel.end });
         } else if (d.mode === 'end' && g.sel) {
-          g.setSel({ start: g.sel.start, end: Math.min(g.dur, Math.max(tm, g.sel.start + 0.05)) });
+          g.setSel({ start: g.sel.start, end: Math.max(tm, g.sel.start + 0.01) });
         }
       },
       onPanResponderRelease: () => {
         const g = geo.current;
         const d = drag.current;
-        if (!d.moved && g.dur > 0) g.seek((d.x0 / g.w) * g.dur);
+        if (!d.moved && g.dur > 0) g.seek(g.view.start + (d.x0 / g.w) * g.span);
       },
     })
   ).current;
 
-  const bars = useMemo(() => {
-    if (!info || !info.peaks) return [];
-    const n = Math.max(24, Math.floor(width / 3));
-    const p = info.peaks;
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      const a = Math.floor((i * p.length) / n);
-      const b = Math.max(a + 1, Math.floor(((i + 1) * p.length) / n));
-      let m = 0;
-      for (let k = a; k < b && k < p.length; k++) if (p[k] > m) m = p[k];
-      out.push(m);
+  // the thin overview bar under the waveform: drag to move the zoomed window
+  const overPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: (e) => {
+        const g = geo.current;
+        const x = e.nativeEvent.locationX;
+        const tm = (x / g.ow) * g.dur;
+        const mid = (g.view.start + g.view.end) / 2;
+        // a touch outside the window jumps the window there
+        if (tm < g.view.start || tm > g.view.end) g.setView(g.clamp(tm - g.span / 2, tm + g.span / 2));
+        ovDrag.current = { x0: x, vs: tm < g.view.start || tm > g.view.end ? tm - g.span / 2 : g.view.start, mid: mid };
+      },
+      onPanResponderMove: (e, gs) => {
+        const g = geo.current;
+        const o = ovDrag.current;
+        const delta = (gs.dx / g.ow) * g.dur;
+        g.setView(g.clamp(o.vs + delta, o.vs + delta + g.span));
+      },
+    })
+  ).current;
+  geo.current.ow = overW;
+  geo.current.setView = setView;
+  geo.current.clamp = clampView;
+
+  // ---------- start and end typed in milliseconds ----------
+  const startMs = selValid ? Math.round(sel.start * 1000) : 0;
+  const endMs = selValid ? Math.round(sel.end * 1000) : 0;
+
+  const applyTyped = (which, text) => {
+    setTyped(text);
+    const v = parseInt(text, 10);
+    if (!isFinite(v) || v < 0) return;
+    const sec = Math.min(dur, v / 1000);
+    if (which === 'start') {
+      const end = selValid ? sel.end : dur;
+      if (sec < end - 0.005) setSel({ start: sec, end: end });
+    } else {
+      const start = selValid ? sel.start : 0;
+      if (sec > start + 0.005) setSel({ start: start, end: sec });
     }
-    return out;
-  }, [info, width]);
+  };
+
+  const nudge = (which, ms) => {
+    if (!selValid) return;
+    if (which === 'start') {
+      const v = Math.max(0, Math.min(sel.end - 0.005, sel.start + ms / 1000));
+      setSel({ start: v, end: sel.end });
+    } else {
+      const v = Math.min(dur, Math.max(sel.start + 0.005, sel.end + ms / 1000));
+      setSel({ start: sel.start, end: v });
+    }
+  };
 
   // ---------- tools ----------
   const doTrim = () => needSel() && pushOp({ t: 'trim', from: sel.start, to: sel.end });
@@ -547,610 +537,607 @@ export default function AudioEditorScreen() {
     pushOp({ t: 'speed', factor: f });
   };
 
-  // ---------- seamless loop ----------
-  const loopSeconds = Math.min(MAX_LOOP_SEC, (parseInt(lh, 10) || 0) * 3600 + (parseInt(lm, 10) || 0) * 60 + (parseFloat(String(ls).replace(',', '.')) || 0));
-  const sectionLen = selValid ? sel.end - sel.start : 0;
-  // blend length in seconds for a part of this length (never more than a third of the part)
-  const xfFor = (len) => Math.min(xfSec > 0 ? xfSec : Math.min(0.25, Math.max(0.03, len * 0.1)), len / 3);
+  // ---------- loop ----------
+  const loopSeconds = () => {
+    const c = parseFloat(String(loopCustom).replace(',', '.'));
+    if (isFinite(c) && c > 0) return Math.min(7200, c * 60);
+    return loopFor;
+  };
 
-  const setLength = (sec) => {
-    setLh(String(Math.floor(sec / 3600)));
-    setLm(String(Math.floor((sec % 3600) / 60)));
-    setLs(String(sec % 60));
+  // body length of one loop (the loop is a little shorter when the picked part starts at the very beginning)
+  const bodySeconds = () => {
+    if (!check || !info) return 0;
+    const len = (check.b - check.a) / info.sampleRate;
+    const xfs = check.xf / info.sampleRate;
+    return check.a >= check.xf ? len : len - xfs;
   };
 
   const openLoop = async () => {
-    await stopPlay();
-    if (!selValid) setSel({ start: 0, end: dur });
-    setPanel('loop');
+    if (!info) return;
+    await openPanel('loop');
   };
 
-  // Takes over a start / end that was typed but not confirmed yet, and returns the part to loop
-  const flushRange = () => {
-    let s = sel.start;
-    let e = sel.end;
-    if (editing.current.s) {
-      const v = parseTime(startTxt);
-      if (v !== null) s = clamp(v, 0, e - 0.05);
-      editing.current.s = false;
-    }
-    if (editing.current.e) {
-      const v = parseTime(endTxt);
-      if (v !== null) e = clamp(v, s + 0.05, dur);
-      editing.current.e = false;
-    }
-    if (s !== sel.start || e !== sel.end) setSel({ start: s, end: e });
-    return { s: s, e: e };
-  };
-
-  // the part [a, b), the blend and the total length, all in exact frames
-  const loopOp = (r) => {
-    const sr = info.sampleRate;
-    const total = info.frames || Math.round(dur * sr);
-    const a = clamp(Math.round(r.s * sr), 0, total - 2);
-    const b = clamp(Math.round(r.e * sr), a + 2, total);
-    return { t: 'loop', a: a, b: b, xf: Math.round(xfFor((b - a) / sr) * sr), target: Math.round(loopSeconds * sr) };
-  };
-
-  const loopReady = (r) => {
-    if (!sel || r.e - r.s < 0.05) {
-      Alert.alert('Choose a part', 'Select the part you want to loop on the waveform, or type its start and end.');
-      return false;
-    }
-    if (loopSeconds < 1) {
-      Alert.alert('How long?', 'Choose how long the loop should last.');
-      return false;
-    }
-    return true;
-  };
+  // check the picked part whenever it or the settings change
+  useEffect(() => {
+    if (panel !== 'loop' || !selValid || !AE) return undefined;
+    let alive = true;
+    setChecking(true);
+    setCheckErr('');
+    const id = setTimeout(async () => {
+      try {
+        const r = await AE.analyzeSelection(sel.start, sel.end, loopXf, loopAlign);
+        if (alive) setCheck(r);
+      } catch (e) {
+        if (alive) {
+          setCheck(null);
+          setCheckErr(e && e.message ? e.message : 'Could not check this part.');
+        }
+      }
+      if (alive) setChecking(false);
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(id);
+    };
+  }, [panel, sel ? sel.start : -1, sel ? sel.end : -1, loopXf, loopAlign]);
 
   const previewLoop = async () => {
-    if (prevRef.current) {
-      await endPreview();
-      return;
-    }
-    Keyboard.dismiss();
-    const r = flushRange();
-    if (!loopReady(r)) return;
-    await stopPlay();
+    if (!check) return;
     try {
       if (Engine.player && Engine.player.pause) Engine.player.pause();
     } catch (e) {}
-    setBusy('Building the preview…');
     try {
-      const op = loopOp(r);
-      await AE.render(JSON.stringify(ops.concat([op])));
-      prevRef.current = true;
-      setPrevLoop(true);
-      // start a few seconds before the first join, so you hear it
-      const sr = info.sampleRate;
-      const from = clamp((op.b - op.a - op.xf) / sr - 3, 0, Math.max(0, loopSeconds - 1));
-      await AE.play(from, -1, 0, false, false);
-      setPlaying(true);
+      await AE.previewLoop(check.a, check.b, check.xf);
+      setLoopPlaying(true);
     } catch (e) {
-      prevRef.current = false;
-      setPrevLoop(false);
-      try {
-        await AE.render(JSON.stringify(ops));
-      } catch (e2) {}
       Alert.alert('Could not preview', e && e.message ? e.message : '');
     }
-    setBusy('');
+  };
+
+  const stopLoopPreview = async () => {
+    await stopPlay();
   };
 
   const applyLoop = async () => {
-    Keyboard.dismiss();
-    const r = flushRange();
-    if (!loopReady(r)) return;
-    prevRef.current = false;
-    setPrevLoop(false);
+    if (!check || !info) return;
+    const body = bodySeconds();
+    const loops = Math.max(1, Math.round(loopSeconds() / Math.max(0.05, body)));
     await stopPlay();
-    const ok = await pushOp(loopOp(r));
-    if (ok) setPanel(null);
-  };
-
-  // the start / end boxes
-  useEffect(() => {
-    if (panel !== 'loop' || !sel) return;
-    if (!editing.current.s) setStartTxt(fmtMs(sel.start));
-    if (!editing.current.e) setEndTxt(fmtMs(sel.end));
-  }, [sel, panel]);
-
-  const commitStart = () => {
-    editing.current.s = false;
-    if (!sel) return;
-    const v = parseTime(startTxt);
-    if (v === null) {
-      setStartTxt(fmtMs(sel.start));
-      return;
+    const ok = await pushOp({ t: 'loop', a: check.a, b: check.b, xf: check.xf, loops: loops, fadeOut: loopFade ? 3 : 0 });
+    if (ok) {
+      setPanel(null);
+      setCheck(null);
     }
-    const s = clamp(v, 0, sel.end - 0.05);
-    endPreview();
-    setSel({ start: s, end: sel.end });
-    setStartTxt(fmtMs(s));
-  };
-
-  const commitEnd = () => {
-    editing.current.e = false;
-    if (!sel) return;
-    const v = parseTime(endTxt);
-    if (v === null) {
-      setEndTxt(fmtMs(sel.end));
-      return;
-    }
-    const e2 = clamp(v, sel.start + 0.05, dur);
-    endPreview();
-    setSel({ start: sel.start, end: e2 });
-    setEndTxt(fmtMs(e2));
-  };
-
-  const nudge = (which, delta) => {
-    if (!sel) return;
-    endPreview();
-    if (which === 's') setSel({ start: clamp(sel.start + delta, 0, sel.end - 0.05), end: sel.end });
-    else setSel({ start: sel.start, end: clamp(sel.end + delta, sel.start + 0.05, dur) });
   };
 
   // ---------- saving ----------
-  const openExport = async () => {
-    await endPreview();
-    await stopPlay();
-    setPanel('export');
-  };
+  const totalSec = dur * repeat.loops;
+  const wavBytes = totalSec * (info ? info.sampleRate * info.channels * 2 : 0);
+  const m4aBytes = totalSec * 24000;
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('AudioEditorProgress', (m) => setProg({ f: m.fraction, stage: m.stage }));
+    return () => sub.remove();
+  }, []);
 
   const doExport = async () => {
-    Keyboard.dismiss();
-    setPanel(null);
     await stopPlay();
-    setBusy('Saving…');
+    setSaving(true);
+    setProg({ f: 0, stage: 'Starting' });
     try {
       const name = String(exportName || 'edited').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100);
-      const path = await AE.exportWav(name);
-      await saveFile(path, name + '.wav', 'audio/wav', true);
+      const path = format === 'wav' ? await AE.exportWav(name, repeat.loops, repeat.fade) : await AE.exportM4a(name, repeat.loops, repeat.fade);
+      setProg({ f: 1, stage: 'Putting it in your Music folder' });
+      await saveFile(path, name + (format === 'wav' ? '.wav' : '.m4a'), format === 'wav' ? 'audio/wav' : 'audio/mp4', true);
       try {
-        if (FileSystem && path) await FileSystem.deleteAsync(path.indexOf('file://') === 0 ? path : 'file://' + path, { idempotent: true });
+        await AE.clearExports();
       } catch (e) {}
-      Alert.alert('Saved', 'Saved as "' + name + '.wav" in Music / Edited songs. Pull down on your song list to refresh it.');
+      setSaving(false);
+      setPanel(null);
+      Alert.alert('Saved', 'Saved as "' + name + (format === 'wav' ? '.wav' : '.m4a') + '" in Music / Edited songs. Pull down on your song list to refresh it.');
     } catch (e) {
+      setSaving(false);
       Alert.alert('Could not save', e && e.message ? e.message : 'Something went wrong.');
     }
-    setBusy('');
   };
 
   // ---------- look ----------
+  const line = t.track;
   const pill = (label, on, onPress) => (
     <TouchableOpacity
       key={label}
       onPress={onPress}
       activeOpacity={0.8}
-      style={{ paddingHorizontal: 13, paddingVertical: 8, borderRadius: 16, marginRight: 8, marginBottom: 8, backgroundColor: on ? t.accent : t.track }}
+      style={{ paddingHorizontal: 13, paddingVertical: 8, borderRadius: 16, marginRight: 8, marginBottom: 8, backgroundColor: on ? t.accent : line }}
     >
       <Text style={{ fontWeight: '700', fontSize: 13, color: on ? t.onAccent : t.text }}>{label}</Text>
     </TouchableOpacity>
   );
-
-  const label = (text, style) => (
-    <Text style={[{ color: t.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.6, marginBottom: 6 }, style]}>{text}</Text>
-  );
-
-  const roundBtn = (icon, onPress) => (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.7} style={{ width: 34, height: 40, alignItems: 'center', justifyContent: 'center' }}>
-      <Ionicons name={icon} size={18} color={t.text} />
-    </TouchableOpacity>
-  );
-
-  // one tool in the bottom bar: a small icon with its name under it
-  const tool = (icon, name, onPress, active) => (
-    <TouchableOpacity key={name} onPress={onPress} activeOpacity={0.7} style={{ width: 64, alignItems: 'center', paddingVertical: 9 }}>
-      <Ionicons name={icon} size={22} color={active ? t.accent : t.text} />
-      <Text numberOfLines={1} style={{ marginTop: 3, fontSize: 10, fontWeight: '600', color: active ? t.accent : t.muted }}>
-        {name}
-      </Text>
-    </TouchableOpacity>
-  );
-
-  const iconBtn = (icon, onPress, disabled) => (
-    <TouchableOpacity onPress={onPress} disabled={disabled} style={{ width: 40, height: 44, alignItems: 'center', justifyContent: 'center', opacity: disabled ? 0.35 : 1 }}>
-      <Ionicons name={icon} size={22} color={t.text} />
-    </TouchableOpacity>
-  );
-
-  const selStartX = selValid ? (sel.start / Math.max(0.001, dur)) * width : 0;
-  const selEndX = selValid ? (sel.end / Math.max(0.001, dur)) * width : 0;
-  const headX = (pos / Math.max(0.001, dur)) * width;
-
-  let waveInner;
-  if (!song) {
-    waveInner = (
-      <TouchableOpacity onPress={openPicker} activeOpacity={0.8} style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-        <View style={{ width: 68, height: 68, borderRadius: 34, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center' }}>
-          <Ionicons name="add" size={42} color={t.onAccent} />
-        </View>
-        <Text style={{ color: t.muted, fontSize: 13, fontWeight: '600', marginTop: 10 }}>Add audio</Text>
-      </TouchableOpacity>
-    );
-  } else if (!info) {
-    waveInner = (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-        <ActivityIndicator color={t.accent} size="large" />
-        <Text style={{ color: t.muted, marginTop: 12 }}>{loading || 'Loading…'}</Text>
+  const toggleRow = (label, sub, on, onPress) => (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.8} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}>
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: t.text, fontWeight: '700', fontSize: 14 }}>{label}</Text>
+        {sub ? <Text style={{ color: t.muted, fontSize: 12, marginTop: 1 }}>{sub}</Text> : null}
       </View>
-    );
-  } else {
-    waveInner = (
-      <View style={{ flex: 1 }} {...pan.panHandlers}>
-        <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center' }}>
-          {bars.map((b, i) => (
-            <View
-              key={i}
-              style={{ width: Math.max(1, width / bars.length - 1), marginRight: 1, height: Math.max(2, b * (WAVE_H - 30)), borderRadius: 1.5, backgroundColor: t.accent, opacity: 0.85 }}
-            />
-          ))}
-        </View>
-        {selValid ? (
-          <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: selStartX, width: Math.max(2, selEndX - selStartX), backgroundColor: t.accent, opacity: 0.22 }} />
-        ) : null}
-        {selValid ? (
-          <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: selStartX - 1.5, width: 3, backgroundColor: t.text }}>
-            <View style={{ position: 'absolute', top: 0, left: -5, width: 13, height: 13, borderRadius: 7, backgroundColor: t.text }} />
-          </View>
-        ) : null}
-        {selValid ? (
-          <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: selEndX - 1.5, width: 3, backgroundColor: t.text }}>
-            <View style={{ position: 'absolute', bottom: 0, left: -5, width: 13, height: 13, borderRadius: 7, backgroundColor: t.text }} />
-          </View>
-        ) : null}
-        {!prevLoop ? <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: headX - 1, width: 2, backgroundColor: '#ff453a' }} /> : null}
+      <View style={{ width: 44, height: 26, borderRadius: 13, backgroundColor: on ? t.accent : line, justifyContent: 'center', padding: 3 }}>
+        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: on ? t.onAccent : t.muted, alignSelf: on ? 'flex-end' : 'flex-start' }} />
       </View>
-    );
-  }
+    </TouchableOpacity>
+  );
 
-  const waveform = (
-    <View
-      onLayout={(e) => setWidth(Math.max(100, e.nativeEvent.layout.width))}
-      style={{ height: WAVE_H, borderRadius: 16, backgroundColor: t.card, overflow: 'hidden', marginHorizontal: 16 }}
+  const toX = (sec) => ((sec - view.start) / span) * width;
+  const selL = selValid ? Math.max(0, toX(sel.start)) : 0;
+  const selR = selValid ? Math.min(width, toX(sel.end)) : 0;
+  const headX = toX(pos);
+  const barCount = peaks.length || 1;
+
+  const barsView = useMemo(
+    () =>
+      peaks.map((b, i) => (
+        <View
+          key={i}
+          style={{ width: Math.max(1, width / barCount - 1), marginRight: 1, height: Math.max(2, b * 170), borderRadius: 1.5, backgroundColor: t.accent, opacity: 0.85 }}
+        />
+      )),
+    [peaks, width, t.accent]
+  );
+
+  const waveform = !song ? (
+    <TouchableOpacity
+      onPress={() => openPanel('choose')}
+      activeOpacity={0.85}
+      style={{ height: 190, borderRadius: 16, borderWidth: 2, borderStyle: 'dashed', borderColor: t.muted, alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}
     >
-      {waveInner}
-    </View>
-  );
-
-  // ---------- the panels at the bottom ----------
-  const loopPanel = (
-    <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
-      <View style={{ flexDirection: 'row' }}>
-        <View style={{ flex: 1, marginRight: 8 }}>
-          {label('START')}
-          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: t.track, borderRadius: 12 }}>
-            {roundBtn('remove', () => nudge('s', -0.01))}
-            <TextInput
-              value={startTxt}
-              onChangeText={setStartTxt}
-              onFocus={() => {
-                editing.current.s = true;
-              }}
-              onEndEditing={commitStart}
-              onSubmitEditing={commitStart}
-              selectTextOnFocus
-              keyboardType="numbers-and-punctuation"
-              placeholder="0:00.000"
-              placeholderTextColor={t.muted}
-              style={{ flex: 1, height: 40, textAlign: 'center', color: t.text, fontSize: 14, fontWeight: '700', padding: 0 }}
-            />
-            {roundBtn('add', () => nudge('s', 0.01))}
-          </View>
-        </View>
-        <View style={{ flex: 1, marginLeft: 8 }}>
-          {label('END')}
-          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: t.track, borderRadius: 12 }}>
-            {roundBtn('remove', () => nudge('e', -0.01))}
-            <TextInput
-              value={endTxt}
-              onChangeText={setEndTxt}
-              onFocus={() => {
-                editing.current.e = true;
-              }}
-              onEndEditing={commitEnd}
-              onSubmitEditing={commitEnd}
-              selectTextOnFocus
-              keyboardType="numbers-and-punctuation"
-              placeholder="0:00.000"
-              placeholderTextColor={t.muted}
-              style={{ flex: 1, height: 40, textAlign: 'center', color: t.text, fontSize: 14, fontWeight: '700', padding: 0 }}
-            />
-            {roundBtn('add', () => nudge('e', 0.01))}
-          </View>
-        </View>
+      <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons name="add" size={38} color={t.onAccent} />
       </View>
-      <Text style={{ color: t.muted, fontSize: 12, marginTop: 6, marginBottom: 12 }}>
-        Part to loop: {sectionLen.toFixed(3)} s (m:ss.mmm)
-      </Text>
-
-      {label('LOOP FOR')}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-        {[[30, '30 s'], [60, '1 min'], [300, '5 min'], [600, '10 min'], [1800, '30 min'], [3600, '1 hour']].map((x) =>
-          pill(x[1], Math.round(loopSeconds) === x[0], () => setLength(x[0]))
-        )}
-      </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-        {[[lh, setLh, 'h'], [lm, setLm, 'min'], [ls, setLs, 's']].map((x) => (
-          <View key={x[2]} style={{ flexDirection: 'row', alignItems: 'center', marginRight: 12 }}>
-            <TextInput
-              value={x[0]}
-              onChangeText={(v) => x[1](v.replace(/[^0-9.]/g, ''))}
-              keyboardType="numeric"
-              selectTextOnFocus
-              maxLength={5}
-              style={{ width: 54, height: 40, borderRadius: 12, textAlign: 'center', backgroundColor: t.track, color: t.text, fontSize: 15, fontWeight: '700', padding: 0 }}
-            />
-            <Text style={{ color: t.muted, marginLeft: 6, fontWeight: '600' }}>{x[2]}</Text>
-          </View>
-        ))}
-        <Text style={{ flex: 1, color: t.muted, fontSize: 12, textAlign: 'right' }}>
-          {fmt(loopSeconds)} · about {fmtSize(loopSeconds * (info ? info.sampleRate * info.channels * 2 : 176400))}
-        </Text>
-      </View>
-
-      {label('BLEND LENGTH')}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-        {[[0, 'Auto'], [0.01, '10 ms'], [0.05, '50 ms'], [0.1, '100 ms'], [0.25, '250 ms'], [0.5, '500 ms'], [1, '1 s']].map((x) =>
-          pill(x[1], xfSec === x[0], () => {
-            endPreview();
-            setXfSec(x[0]);
-          })
-        )}
-      </View>
-
-      <TouchableOpacity
-        onPress={previewLoop}
-        activeOpacity={0.8}
-        style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 44, borderRadius: 12, backgroundColor: t.card, marginTop: 4, marginBottom: 14 }}
-      >
-        <Ionicons name={prevLoop ? 'stop' : 'play'} size={18} color={t.text} />
-        <Text style={{ marginLeft: 8, color: t.text, fontWeight: '800', fontSize: 14 }}>{prevLoop ? 'Stop preview' : 'Preview loop'}</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const volumePanel = (
-    <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
-      {label(selValid ? 'SELECTED PART' : 'WHOLE SONG')}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-        {[-12, -6, -3, 3, 6, 9].map((db) => pill((db > 0 ? '+' : '') + db + ' dB', false, () => doGain(db)))}
-      </View>
-      {pill('Normalize', false, doNormalize)}
-    </View>
-  );
-
-  const speedPanel = (
-    <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{[0.5, 0.75, 0.9, 1.1, 1.25, 1.5, 2].map((f) => pill(f + 'x', false, () => doSpeed(f)))}</View>
-    </View>
-  );
-
-  const exportPanel = (
-    <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
-      {label('FILE NAME')}
-      <TextInput
-        value={exportName}
-        onChangeText={setExportName}
-        placeholder="File name"
-        placeholderTextColor={t.muted}
-        style={{ backgroundColor: t.track, color: t.text, borderRadius: 12, paddingHorizontal: 14, height: 46, fontSize: 15, marginBottom: 8 }}
-      />
-      <Text style={{ color: t.muted, fontSize: 12, marginBottom: 14 }}>
-        WAV · about {fmtSize((info ? info.duration * info.sampleRate * info.channels * 2 : 0) || 0)} · Music / Edited songs
-      </Text>
-    </View>
-  );
-
-  const panelTitle = panel === 'loop' ? 'Seamless loop' : panel === 'volume' ? 'Volume' : panel === 'speed' ? 'Speed' : 'Save';
-  const panelBody = panel === 'loop' ? loopPanel : panel === 'volume' ? volumePanel : panel === 'speed' ? speedPanel : panel === 'export' ? exportPanel : null;
-  const panelApply = panel === 'loop' ? applyLoop : panel === 'export' ? doExport : null;
-
-  const bottomPadNow = kbPad > 0 ? kbPad : insets.bottom;
-  const panelMax = colH > 0 ? Math.max(150, Math.round((colH - insets.top - bottomPadNow - 52 - 48) * 0.6)) : Math.round(win.height * 0.5);
-
-  const bottom = panel ? (
-    <View style={{ backgroundColor: t.bg, borderTopWidth: 1, borderTopColor: t.track }}>
-      <ScrollView style={{ maxHeight: panelMax }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        {panelBody}
-      </ScrollView>
-      <View style={{ flexDirection: 'row', alignItems: 'center', height: 48, paddingHorizontal: 6, borderTopWidth: 1, borderTopColor: t.track }}>
-        <TouchableOpacity onPress={closePanel} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-          <Ionicons name="close" size={24} color={t.text} />
-        </TouchableOpacity>
-        <Text style={{ flex: 1, textAlign: 'center', color: t.text, fontWeight: '800', fontSize: 15 }}>{panelTitle}</Text>
-        {panelApply ? (
-          <TouchableOpacity onPress={panelApply} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="checkmark" size={26} color={t.accent} />
-          </TouchableOpacity>
-        ) : (
-          <View style={{ width: 44 }} />
-        )}
-      </View>
+      <Text style={{ color: t.muted, marginTop: 10, fontWeight: '600' }}>Tap to add audio</Text>
+    </TouchableOpacity>
+  ) : !info ? (
+    <View style={{ height: 190, alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+      <ActivityIndicator color={t.accent} size="large" />
+      <Text style={{ color: t.muted, marginTop: 10 }}>{loading || 'Loading…'}</Text>
     </View>
   ) : (
-    <View style={{ backgroundColor: t.bg, borderTopWidth: 1, borderTopColor: t.track, opacity: info ? 1 : 0.4 }} pointerEvents={info ? 'auto' : 'none'}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 6 }}>
-        {tool('contract', 'Trim', guard(doTrim))}
-        {tool('cut', 'Cut', guard(doCut))}
-        {tool('trending-up', 'Fade in', guard(doFadeIn))}
-        {tool('trending-down', 'Fade out', guard(doFadeOut))}
-        {tool('volume-high', 'Volume', guard(() => setPanel('volume')))}
-        {tool('volume-mute', 'Silence', guard(doSilence))}
-        {tool('swap-horizontal', 'Reverse', guard(doReverse))}
-        {tool('speedometer', 'Speed', guard(() => setPanel('speed')))}
-        {tool('infinite', 'Loop', guard(openLoop), hasLoop)}
-      </ScrollView>
+    <View
+      onLayout={(e) => setWidth(Math.max(100, e.nativeEvent.layout.width))}
+      style={{ height: 190, borderRadius: 16, backgroundColor: t.card, overflow: 'hidden', marginBottom: 8 }}
+      {...pan.panHandlers}
+    >
+      <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center' }}>
+        {barsView}
+      </View>
+      {selValid && selR > selL ? (
+        <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: selL, width: Math.max(2, selR - selL), backgroundColor: t.accent, opacity: 0.25 }} />
+      ) : null}
+      {selValid && toX(sel.start) >= 0 && toX(sel.start) <= width ? (
+        <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: toX(sel.start) - 2, width: 4, backgroundColor: t.text }} />
+      ) : null}
+      {selValid && toX(sel.end) >= 0 && toX(sel.end) <= width ? (
+        <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: toX(sel.end) - 2, width: 4, backgroundColor: t.text }} />
+      ) : null}
+      {headX >= 0 && headX <= width ? (
+        <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: headX - 1, width: 2, backgroundColor: '#ff453a' }} />
+      ) : null}
     </View>
   );
 
-  // ---------- the song card ----------
-  const pickerCard = pickOpen ? (
-    <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
-      <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setPickOpen(false)} />
+  const overview = info ? (
+    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+      <TouchableOpacity onPress={zoomOut} style={{ padding: 6 }}>
+        <Ionicons name="remove-circle-outline" size={24} color={t.text} />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={zoomFit} style={{ padding: 6 }}>
+        <Ionicons name="scan-outline" size={22} color={t.text} />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={zoomIn} style={{ padding: 6 }}>
+        <Ionicons name="add-circle-outline" size={24} color={t.text} />
+      </TouchableOpacity>
       <View
-        style={{
-          height: Math.round(win.height * 0.72),
-          backgroundColor: t.bg,
-          borderTopLeftRadius: 22,
-          borderTopRightRadius: 22,
-          paddingTop: 8,
-          paddingBottom: kbPad > 0 ? kbPad : insets.bottom,
-        }}
+        onLayout={(e) => setOverW(Math.max(50, e.nativeEvent.layout.width))}
+        style={{ flex: 1, height: 22, borderRadius: 11, backgroundColor: line, marginLeft: 8, overflow: 'hidden' }}
+        {...overPan.panHandlers}
       >
-        <View style={{ flexDirection: 'row', alignItems: 'center', paddingLeft: 18, paddingRight: 6, height: 46 }}>
-          <Text style={{ flex: 1, color: t.text, fontSize: 18, fontWeight: '800' }}>Choose audio</Text>
-          <TouchableOpacity onPress={() => setPickOpen(false)} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="close" size={24} color={t.text} />
-          </TouchableOpacity>
-        </View>
-        <TextInput
-          value={q}
-          onChangeText={setQ}
-          placeholder="Search songs…"
-          placeholderTextColor={t.muted}
-          style={{ marginHorizontal: 16, marginBottom: 8, height: 44, borderRadius: 12, paddingHorizontal: 14, backgroundColor: t.card, color: t.text }}
-        />
-        {libLoading && lib.length === 0 ? <ActivityIndicator color={t.accent} style={{ marginTop: 20 }} /> : null}
-        <FlatList
-          data={shown}
-          keyExtractor={(it) => it.id}
-          keyboardShouldPersistTaps="handled"
-          renderItem={({ item }) => (
-            <TouchableOpacity onPress={() => pickSong(item)} style={{ paddingVertical: 12, paddingHorizontal: 18 }}>
-              <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
-                {item.title}
-              </Text>
-              <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }} numberOfLines={1}>
-                {item.filename}
-              </Text>
-            </TouchableOpacity>
-          )}
+        <View
+          pointerEvents="none"
+          style={{ position: 'absolute', top: 2, bottom: 2, left: (view.start / Math.max(0.001, dur)) * overW, width: Math.max(10, (span / Math.max(0.001, dur)) * overW), borderRadius: 9, backgroundColor: t.accent, opacity: 0.8 }}
         />
       </View>
     </View>
   ) : null;
 
-  if (!open) return null;
+  const field = (which, label, value) => (
+    <View style={{ flex: 1, marginRight: which === 'start' ? 10 : 0 }}>
+      <Text style={{ color: t.muted, fontSize: 11, fontWeight: '700', marginBottom: 4 }}>{label}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <TouchableOpacity onPress={() => nudge(which, -10)} style={{ width: 30, height: 40, alignItems: 'center', justifyContent: 'center' }}>
+          <Ionicons name="remove" size={18} color={t.text} />
+        </TouchableOpacity>
+        <TextInput
+          value={editing === which ? typed : selValid ? String(value) : ''}
+          onFocus={() => {
+            setEditing(which);
+            setTyped(selValid ? String(value) : '');
+          }}
+          onBlur={() => setEditing(null)}
+          onChangeText={(x) => applyTyped(which, x.replace(/[^0-9]/g, ''))}
+          keyboardType="number-pad"
+          placeholder="ms"
+          placeholderTextColor={t.muted}
+          style={{ flex: 1, height: 40, borderRadius: 10, backgroundColor: line, color: t.text, textAlign: 'center', fontSize: 14, fontWeight: '700', paddingVertical: 0 }}
+        />
+        <TouchableOpacity onPress={() => nudge(which, 10)} style={{ width: 30, height: 40, alignItems: 'center', justifyContent: 'center' }}>
+          <Ionicons name="add" size={18} color={t.text} />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 
-  const bottomPad = kbPad > 0 ? kbPad : insets.bottom;
+  const toolDefs = [
+    ['add', 'add-circle-outline', 'Audio', () => openPanel('choose'), true],
+    ['trim', 'contract-outline', 'Trim', doTrim, false],
+    ['cut', 'cut-outline', 'Cut', doCut, false],
+    ['fadein', 'trending-up', 'Fade in', doFadeIn, false],
+    ['fadeout', 'trending-down', 'Fade out', doFadeOut, false],
+    ['volume', 'volume-high-outline', 'Volume', () => openPanel('volume'), false],
+    ['speed', 'speedometer-outline', 'Speed', () => openPanel('speed'), false],
+    ['reverse', 'swap-horizontal', 'Reverse', doReverse, false],
+    ['silence', 'volume-mute-outline', 'Silence', doSilence, false],
+    ['loop', 'infinite-outline', 'Loop', openLoop, false],
+  ];
 
-  return (
-    <View
-      ref={rootRef}
-      collapsable={false}
-      style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: t.bg, zIndex: 999, elevation: 999 }}
-    >
-      <View style={{ flex: 1, paddingTop: insets.top, paddingBottom: bottomPad }} onLayout={(e) => setColH(e.nativeEvent.layout.height)}>
-        {/* top bar */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, height: 52 }}>
-          <TouchableOpacity onPress={close} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="chevron-down" size={28} color={t.text} />
-          </TouchableOpacity>
-          <Text style={{ flex: 1, color: t.text, fontSize: 18, fontWeight: '800' }}>Audio Editor</Text>
-          {song && info ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              {iconBtn('arrow-undo', undo, ops.length === 0)}
-              {iconBtn('arrow-redo', redoOp, redo.length === 0)}
-              {iconBtn('musical-notes', openPicker, false)}
-              <TouchableOpacity
-                onPress={openExport}
-                style={{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, backgroundColor: t.accent, marginLeft: 2, marginRight: 4 }}
-              >
-                <Text style={{ color: t.onAccent, fontWeight: '800' }}>Save</Text>
-              </TouchableOpacity>
-            </View>
+  const toolbar = (
+    <View style={{ backgroundColor: t.card, borderTopWidth: 1, borderTopColor: line }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 6 }}>
+        {toolDefs.map((x) => {
+          const off = !x[4] && !info;
+          const on = panel === x[0] || (x[0] === 'add' && panel === 'choose');
+          return (
+            <TouchableOpacity
+              key={x[0]}
+              onPress={x[3]}
+              disabled={off}
+              activeOpacity={0.7}
+              style={{ width: 66, alignItems: 'center', paddingVertical: 10, opacity: off ? 0.35 : 1 }}
+            >
+              <Ionicons name={x[1]} size={23} color={on ? t.accent : t.text} />
+              <Text style={{ marginTop: 3, fontSize: 10, fontWeight: '700', color: on ? t.accent : t.muted }} numberOfLines={1}>
+                {x[2]}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+
+  const editor = (
+    <View style={{ flex: 1 }}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 10 }} keyboardShouldPersistTaps="handled">
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', marginBottom: 8 }}>
+          <Text style={{ flex: 1, color: t.text, fontSize: 15, fontWeight: '800' }} numberOfLines={1}>
+            {song ? song.title : 'No audio yet'}
+          </Text>
+          {info ? (
+            <Text style={{ color: t.muted, fontSize: 12, marginLeft: 8 }}>
+              {fmt(pos)} / {fmt(dur)}
+            </Text>
           ) : null}
         </View>
+        {lastLoop ? (
+          <Text style={{ color: t.accent, fontSize: 12, fontWeight: '700', marginBottom: 8 }}>
+            Loop x{repeat.loops}: saves as {fmtLong(totalSec)} long
+          </Text>
+        ) : ops.length > 0 ? (
+          <Text style={{ color: t.muted, fontSize: 11, marginBottom: 8 }} numberOfLines={2}>
+            {ops.map(opLabel).join(' > ')}
+          </Text>
+        ) : null}
 
-        {!AE ? (
-          <Text style={{ color: t.muted, padding: 24, textAlign: 'center' }}>The audio editor is not part of this build of the app.</Text>
-        ) : (
-          <>
-            <ScrollView
-              style={{ flex: 1 }}
-              contentContainerStyle={{ paddingBottom: 12 }}
-              keyboardShouldPersistTaps="handled"
-              scrollEnabled={upContentH > upH + 1}
-              onLayout={(e) => setUpH(e.nativeEvent.layout.height)}
-              onContentSizeChange={(w, h) => setUpContentH(h)}
+        {waveform}
+        {overview}
+
+        {info ? (
+          <View style={{ marginBottom: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+              {field('start', 'START (ms)', startMs)}
+              {field('end', 'END (ms)', endMs)}
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+              <Text style={{ flex: 1, color: t.muted, fontSize: 12 }}>
+                {selValid ? 'Selected ' + (sel.end - sel.start).toFixed(3) + ' s' : 'Drag on the waveform, or type start and end'}
+              </Text>
+              <TouchableOpacity onPress={() => setSel({ start: 0, end: dur })} style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, backgroundColor: line, marginRight: 8 }}>
+                <Text style={{ color: t.text, fontSize: 12, fontWeight: '700' }}>Select all</Text>
+              </TouchableOpacity>
+              {selValid ? (
+                <TouchableOpacity onPress={() => setSel(null)} style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, backgroundColor: line }}>
+                  <Text style={{ color: t.text, fontSize: 12, fontWeight: '700' }}>Clear</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
+
+        {info ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+            <TouchableOpacity onPress={() => seekTo(selValid ? sel.start : 0)} style={{ padding: 10 }}>
+              <Ionicons name="play-skip-back" size={24} color={t.text} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={togglePlay}
+              style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center', marginHorizontal: 12 }}
             >
-              {song && info ? (
-                <View style={{ paddingHorizontal: 16, marginBottom: 10 }}>
-                  <Text style={{ color: t.text, fontSize: 16, fontWeight: '800' }} numberOfLines={1}>
-                    {song.title}
-                  </Text>
-                  <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }}>
-                    {fmt(dur)} · {info.sampleRate} Hz · {info.channels === 1 ? 'mono' : 'stereo'}
-                    {ops.length > 0 ? ' · ' + ops.length + (ops.length === 1 ? ' edit' : ' edits') : ''}
-                  </Text>
-                </View>
-              ) : (
-                <View style={{ height: 8 }} />
-              )}
+              <Ionicons name={playing ? 'pause' : 'play'} size={27} color={t.onAccent} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setLoopOn(!loopOn)} style={{ padding: 10 }}>
+              <Ionicons name="repeat" size={24} color={loopOn ? t.accent : t.muted} />
+            </TouchableOpacity>
+            {ops.length > 0 ? (
+              <TouchableOpacity
+                onPress={toggleAB}
+                style={{ position: 'absolute', right: 0, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 14, backgroundColor: useOriginal ? t.accent : line }}
+              >
+                <Text style={{ color: useOriginal ? t.onAccent : t.text, fontWeight: '700', fontSize: 12 }}>{useOriginal ? 'Original' : 'Edited'}</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
+      </ScrollView>
+      {toolbar}
+    </View>
+  );
 
-              {waveform}
+  // ---------- the panels (they sit inside this screen, above the phone's own buttons) ----------
+  const q = query.trim().toLowerCase();
+  const shown = songs ? songs.filter((s) => !q || (s.title + ' ' + s.filename).toLowerCase().indexOf(q) >= 0).slice(0, 300) : [];
 
-              {song && info ? (
-                <View>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, marginTop: 8 }}>
-                    <Text style={{ color: t.muted, fontSize: 12 }}>{fmt(pos)}</Text>
-                    <Text style={{ color: t.muted, fontSize: 12 }}>
-                      {selValid ? fmt(sel.start) + ' – ' + fmt(sel.end) + '  (' + (sel.end - sel.start).toFixed(1) + ' s)' : ''}
-                    </Text>
-                    <Text style={{ color: t.muted, fontSize: 12 }}>{fmt(dur)}</Text>
-                  </View>
+  const choosePanel = (
+    <View style={{ height: winH * 0.66 }}>
+      <Text style={{ color: t.text, fontSize: 19, fontWeight: '800', marginBottom: 10 }}>Choose audio</Text>
+      <TextInput
+        value={query}
+        onChangeText={setQuery}
+        placeholder="Search songs…"
+        placeholderTextColor={t.muted}
+        style={{ height: 42, borderRadius: 12, paddingHorizontal: 14, backgroundColor: line, color: t.text, marginBottom: 6 }}
+      />
+      {!songs ? <ActivityIndicator color={t.accent} style={{ marginTop: 24 }} /> : null}
+      {songs && songs.length === 0 ? <Text style={{ color: t.muted, textAlign: 'center', marginTop: 24 }}>No songs found.</Text> : null}
+      <FlatList
+        data={shown}
+        keyExtractor={(it) => it.id}
+        keyboardShouldPersistTaps="handled"
+        renderItem={({ item }) => (
+          <TouchableOpacity onPress={() => loadSong(item)} style={{ paddingVertical: 11 }}>
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
+              {item.title}
+            </Text>
+            <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }} numberOfLines={1}>
+              {item.duration ? fmt(item.duration) + '  ' : ''}
+              {item.filename}
+            </Text>
+          </TouchableOpacity>
+        )}
+      />
+    </View>
+  );
 
-                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, marginTop: 6 }}>
-                    <TouchableOpacity onPress={() => seekTo(0)} style={{ padding: 10 }}>
-                      <Ionicons name="play-skip-back" size={22} color={t.text} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      onPress={togglePlay}
-                      style={{ width: 54, height: 54, borderRadius: 27, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center', marginHorizontal: 6 }}
-                    >
-                      <Ionicons name={playing ? 'pause' : 'play'} size={26} color={t.onAccent} />
-                    </TouchableOpacity>
-                    {!hasLoop ? (
-                      <TouchableOpacity onPress={() => setLoopOn(!loopOn)} style={{ padding: 10 }}>
-                        <Ionicons name="repeat" size={22} color={loopOn ? t.accent : t.muted} />
-                      </TouchableOpacity>
-                    ) : null}
-                    <View style={{ flex: 1 }} />
-                    {selValid && !hasLoop ? (
-                      <TouchableOpacity onPress={() => setSel(null)} style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: t.card, marginRight: 8 }}>
-                        <Text style={{ color: t.text, fontWeight: '700', fontSize: 12 }}>Clear</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                    {ops.length > 0 ? (
-                      <TouchableOpacity
-                        onPress={toggleAB}
-                        style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: useOriginal ? t.accent : t.card }}
-                      >
-                        <Text style={{ color: useOriginal ? t.onAccent : t.text, fontWeight: '700', fontSize: 12 }}>{useOriginal ? 'Original' : 'Edited'}</Text>
-                      </TouchableOpacity>
-                    ) : null}
+  const body0 = bodySeconds();
+  const wantSec = loopSeconds();
+  const loops = Math.max(1, Math.round(wantSec / Math.max(0.05, body0)));
+
+  const loopPanel = (
+    <View>
+      <Text style={{ color: t.text, fontSize: 19, fontWeight: '800' }}>Loop</Text>
+      {!selValid ? (
+        <View>
+          <Text style={{ color: t.muted, fontSize: 13, marginTop: 6, marginBottom: 12 }}>
+            Pick the part to repeat first. Drag on the waveform, or type a start and end in milliseconds. To loop the whole song, tap Select all.
+          </Text>
+          <Btn
+            t={t}
+            label="Select all"
+            onPress={() => setSel({ start: 0, end: dur })}
+          />
+        </View>
+      ) : (
+        <View>
+          <Text style={{ color: t.muted, fontSize: 13, marginTop: 4, marginBottom: 10 }}>
+            Repeats {fmt(sel.start)} to {fmt(sel.end)} ({(sel.end - sel.start).toFixed(2)} s) with no gap.
+          </Text>
+
+          {checking ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+              <ActivityIndicator color={t.accent} size="small" />
+              <Text style={{ color: t.muted, marginLeft: 8, fontSize: 13 }}>Checking the seam…</Text>
+            </View>
+          ) : check ? (
+            <View style={{ backgroundColor: t.card, borderRadius: 14, padding: 12, marginBottom: 10 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={{ flex: 1, color: t.text, fontWeight: '800' }}>Seam quality</Text>
+                <Text style={{ color: qualityColor(check.quality), fontWeight: '800' }}>
+                  {qualityLabel(check.quality)} ({Math.round(check.quality)})
+                </Text>
+              </View>
+              <View style={{ height: 6, borderRadius: 3, backgroundColor: line, marginTop: 8, overflow: 'hidden' }}>
+                <View style={{ height: 6, width: Math.round(check.quality) + '%', backgroundColor: qualityColor(check.quality) }} />
+              </View>
+              <Text style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
+                {loopAlign
+                  ? check.shiftMs !== 0
+                    ? 'End moved by ' + (check.shiftMs > 0 ? '+' : '') + check.shiftMs + ' ms to line the waveforms up. '
+                    : 'The range already lines up. '
+                  : 'Your exact range is kept. '}
+                Blend {Math.round((check.xf / info.sampleRate) * 1000)} ms.
+              </Text>
+              {check.quality < 35 ? (
+                <Text style={{ color: '#ffb020', fontSize: 12, marginTop: 6 }}>
+                  The start and end of this part do not sound alike, so the seam may be noticeable. Try another range, or a longer blend.
+                </Text>
+              ) : null}
+            </View>
+          ) : checkErr ? (
+            <Text style={{ color: '#ff6b5e', fontSize: 13, marginBottom: 10 }}>{checkErr}</Text>
+          ) : null}
+
+          <Text style={{ color: t.muted, fontSize: 11, fontWeight: '700', marginBottom: 6 }}>LOOP IT FOR</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+            {LOOP_LENGTHS.map((x) =>
+              pill(x[1], !loopCustom && loopFor === x[0], () => {
+                setLoopCustom('');
+                setLoopFor(x[0]);
+              })
+            )}
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+            <Text style={{ color: t.muted, fontSize: 13 }}>or type minutes</Text>
+            <TextInput
+              value={loopCustom}
+              onChangeText={(x) => setLoopCustom(x.replace(/[^0-9.,]/g, ''))}
+              keyboardType="decimal-pad"
+              placeholder="e.g. 45"
+              placeholderTextColor={t.muted}
+              style={{ width: 90, height: 36, borderRadius: 10, backgroundColor: line, color: t.text, textAlign: 'center', marginLeft: 10, paddingVertical: 0 }}
+            />
+          </View>
+          {check ? (
+            <Text style={{ color: t.text, fontSize: 13, fontWeight: '700', marginBottom: 8 }}>
+              {loops} loops, about {fmtLong(loops * body0)} in total
+            </Text>
+          ) : null}
+
+          <Text style={{ color: t.muted, fontSize: 11, fontWeight: '700', marginBottom: 6 }}>BLEND</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+            {[[0, 'Auto'], [0.02, '20 ms'], [0.1, '100 ms'], [0.5, '0.5 s'], [1, '1 s'], [2, '2 s']].map((x) => pill(x[1], loopXf === x[0], () => setLoopXf(x[0])))}
+          </View>
+
+          {toggleRow('Line the end up automatically', 'Moves the end by a few milliseconds for the smoothest seam', loopAlign, () => setLoopAlign(!loopAlign))}
+          {toggleRow('Fade out at the end', 'Fades the last 3 seconds', loopFade, () => setLoopFade(!loopFade))}
+
+          <View style={{ flexDirection: 'row', marginTop: 8 }}>
+            {loopPlaying ? (
+              <Btn t={t} icon="stop" label="Stop preview" alt style={{ flex: 1, marginRight: 8 }} onPress={stopLoopPreview} />
+            ) : (
+              <Btn t={t} icon="play" label="Preview" alt style={{ flex: 1, marginRight: 8 }} disabled={!check || checking} onPress={previewLoop} />
+            )}
+            <Btn t={t} icon="checkmark" label="Apply loop" style={{ flex: 1 }} disabled={!check || checking} onPress={applyLoop} />
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
+  const volumePanel = (
+    <View>
+      <Text style={{ color: t.text, fontSize: 19, fontWeight: '800' }}>Volume</Text>
+      <Text style={{ color: t.muted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>
+        {selValid ? 'Applies to the selected part.' : 'Applies to the whole audio.'}
+      </Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+        {[-12, -6, -3, 3, 6, 9].map((db) => pill((db > 0 ? '+' : '') + db + ' dB', false, () => doGain(db)))}
+      </View>
+      <Btn t={t} icon="stats-chart" label="Normalize" style={{ marginTop: 6 }} onPress={doNormalize} />
+    </View>
+  );
+
+  const speedPanel = (
+    <View>
+      <Text style={{ color: t.text, fontSize: 19, fontWeight: '800' }}>Speed</Text>
+      <Text style={{ color: t.muted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>The pitch changes with the speed, like a tape.</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{[0.5, 0.75, 0.9, 1.1, 1.25, 1.5, 2].map((f) => pill(f + 'x', false, () => doSpeed(f)))}</View>
+    </View>
+  );
+
+  const exportPanel = (
+    <View>
+      <Text style={{ color: t.text, fontSize: 19, fontWeight: '800' }}>Save</Text>
+      <Text style={{ color: t.muted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>
+        Saves a new file in Music / Edited songs. Your original song is not changed.
+      </Text>
+      <TextInput
+        value={exportName}
+        onChangeText={setExportName}
+        editable={!saving}
+        placeholder="File name"
+        placeholderTextColor={t.muted}
+        style={{ backgroundColor: line, color: t.text, borderRadius: 12, paddingHorizontal: 14, height: 44, fontSize: 15, marginBottom: 12 }}
+      />
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+        {pill('M4A  (small, about ' + mbText(m4aBytes) + ')', format === 'm4a', () => !saving && setFormat('m4a'))}
+        {pill('WAV  (full quality, about ' + mbText(wavBytes) + ')', format === 'wav', () => !saving && setFormat('wav'))}
+      </View>
+      <Text style={{ color: t.muted, fontSize: 12, marginBottom: 12 }}>Length: {fmtLong(totalSec)}</Text>
+      {saving ? (
+        <View>
+          <View style={{ height: 8, borderRadius: 4, backgroundColor: line, overflow: 'hidden' }}>
+            <View style={{ height: 8, width: Math.round(prog.f * 100) + '%', backgroundColor: t.accent }} />
+          </View>
+          <Text style={{ color: t.muted, fontSize: 13, marginTop: 8 }}>{prog.stage}</Text>
+        </View>
+      ) : (
+        <Btn t={t} icon="download" label="Save" onPress={doExport} />
+      )}
+    </View>
+  );
+
+  const panelContent = panel === 'choose' ? choosePanel : panel === 'loop' ? loopPanel : panel === 'volume' ? volumePanel : panel === 'speed' ? speedPanel : panel === 'export' ? exportPanel : null;
+
+  const panelView = panel ? (
+    <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, justifyContent: 'flex-end' }}>
+      <TouchableOpacity activeOpacity={1} onPress={closePanel} style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' }} />
+      <View style={{ backgroundColor: t.bg, borderTopLeftRadius: 22, borderTopRightRadius: 22, maxHeight: winH * 0.78, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 10 }}>
+        {panel === 'choose' ? (
+          panelContent
+        ) : (
+          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {panelContent}
+            <View style={{ height: 6 }} />
+          </ScrollView>
+        )}
+      </View>
+    </View>
+  ) : null;
+
+  const header = info ? (
+    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+      <TouchableOpacity onPress={undo} disabled={ops.length === 0} style={{ padding: 8, opacity: ops.length === 0 ? 0.35 : 1 }}>
+        <Ionicons name="arrow-undo" size={22} color={t.text} />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={redoOp} disabled={redo.length === 0} style={{ padding: 8, opacity: redo.length === 0 ? 0.35 : 1 }}>
+        <Ionicons name="arrow-redo" size={22} color={t.text} />
+      </TouchableOpacity>
+      <TouchableOpacity
+        onPress={() => openPanel('export')}
+        style={{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, backgroundColor: t.accent, marginLeft: 4, marginRight: 6 }}
+      >
+        <Text style={{ color: t.onAccent, fontWeight: '800' }}>Save</Text>
+      </TouchableOpacity>
+    </View>
+  ) : null;
+
+  return (
+    <View pointerEvents="box-none">
+      <Modal visible={open} animationType="slide" onRequestClose={panel ? closePanel : close}>
+        <Screen t={t} title="Audio Editor" onClose={close} right={header}>
+          {AE ? (
+            <View style={{ flex: 1 }}>
+              {editor}
+              {panelView}
+              {busy ? (
+                <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' }}>
+                  <View style={{ backgroundColor: t.card, borderRadius: 16, padding: 22, alignItems: 'center' }}>
+                    <ActivityIndicator color={t.accent} size="large" />
+                    <Text style={{ color: t.text, marginTop: 12, fontWeight: '700' }}>{busy}</Text>
                   </View>
                 </View>
               ) : null}
-            </ScrollView>
-
-            {bottom}
-          </>
-        )}
-      </View>
-
-      {pickerCard}
-
-      {busy ? (
-        <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{ backgroundColor: t.card, borderRadius: 16, padding: 22, alignItems: 'center' }}>
-            <ActivityIndicator color={t.accent} size="large" />
-            <Text style={{ color: t.text, marginTop: 12, fontWeight: '700' }}>{busy}</Text>
-          </View>
-        </View>
-      ) : null}
+            </View>
+          ) : (
+            <Text style={{ color: t.muted, padding: 24, textAlign: 'center' }}>The audio editor is not part of this build of the app.</Text>
+          )}
+        </Screen>
+      </Modal>
     </View>
   );
 }
