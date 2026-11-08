@@ -14,8 +14,6 @@ public final class OpsRunner {
         public long a, b, xf, target;
     }
 
-    public static final int MAX_SECONDS = 600; // a rendered result is capped at 10 minutes (memory)
-
     public static short[] apply(short[] d, int ch, int sr, Op op) {
         int n = d.length / ch;
         long f = op.from < 0 ? 0 : Math.round(op.from * sr);
@@ -33,10 +31,8 @@ public final class OpsRunner {
         if (k.equals("reverse")) return AudioOps.reverse(d, ch, f, t);
         if (k.equals("speed")) return AudioOps.speed(d, ch, op.factor);
         if (k.equals("loop")) {
-            long target = op.target;
-            long cap = (long) MAX_SECONDS * sr;
-            if (target > cap) target = cap;
-            return LoopEngine.build(d, ch, (int) op.a, (int) op.b, (int) op.xf, target);
+            // the loop itself (one seamless cycle). How many times it repeats is applied when the result is played or saved.
+            return LoopMaker.build(d, ch, (int) op.a, (int) op.b, (int) op.xf);
         }
         return d; // unknown edit: leave the audio as it is
     }
