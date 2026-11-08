@@ -52,3 +52,6 @@ if (mf.indexOf('android:largeHeap') < 0) {
   fs.writeFileSync(mfPath, mf);
 }
 console.log('Audio editor engine linked into the app');
+
+// the app icon: your own picture app-icon.jpg in the main folder of the repo, if there is one
+require('./link-icon.js');
