@@ -96,18 +96,6 @@ jobs:
           echo "Patched lines:"; grep -n "originalItem" "$MM" || true
           npm install @missingcore/react-native-metadata-retriever@^3.2.1 || echo "Song details library failed to install, continuing without it"
 
-      - name: Make the app icon from your icon.jpg
-        run: |
-          ICON=$(ls icon.jpg icon.jpeg icon.JPG icon.JPEG icon.png 2>/dev/null | head -1)
-          if [ -n "$ICON" ]; then
-            echo "Using $ICON as the app icon"
-            mkdir -p /tmp/imgtool
-            (cd /tmp/imgtool && npm init -y >/dev/null 2>&1 && npm install sharp)
-            NODE_PATH=/tmp/imgtool/node_modules node make-icon.js "$ICON" musicapp/assets || echo "The icon could not be made, the default icon stays"
-          else
-            echo "No icon.jpg in the repo, the default icon stays"
-          fi
-
       - name: Set app name, package and permissions
         env:
           RUN_NUMBER: ${{ github.run_number }}
@@ -125,10 +113,6 @@ jobs:
           cfg.expo.android = cfg.expo.android || {};
           cfg.expo.android.package = 'com.mymusic.plus';
           cfg.expo.android.versionCode = run;
-          if (fs.existsSync('assets/adaptive-bg.png')) {
-            cfg.expo.icon = './assets/icon.png';
-            cfg.expo.android.adaptiveIcon = { foregroundImage: './assets/adaptive-icon.png', backgroundImage: './assets/adaptive-bg.png' };
-          }
           cfg.expo.android.permissions = [
             'android.permission.READ_MEDIA_AUDIO',
             'android.permission.READ_EXTERNAL_STORAGE',
