@@ -37,3 +37,6 @@ console.log('History backup storage linked into the app');
 
 // the audio editor's native engine is linked the same way
 require('./link-audioedit.js');
+
+// the animated screen for the Music Finder download
+require('./link-runui.js');
