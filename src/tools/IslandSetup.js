@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Modal, TouchableOpacity, ScrollView, AppState, NativeModules, DeviceEventEmitter, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { loadSettings } from '../library';
 import { getTheme } from '../theme';
 
@@ -69,8 +69,14 @@ function Stepper({ t, label, value, unit, onChange, min, max, step }) {
   );
 }
 
-export default function IslandSetup() {
+// Inside a Modal the phone gives a separate window, so this page measures its own safe area
+// (the top bar, and the bottom navigation buttons). That keeps everything above the navigation buttons.
+function SafePage({ t, children }) {
   const insets = useSafeAreaInsets();
+  return <View style={{ flex: 1, backgroundColor: t.bg, paddingTop: insets.top, paddingBottom: insets.bottom }}>{children}</View>;
+}
+
+export default function IslandSetup() {
   const [open, setOpen] = useState(false);
   const [st, setSt] = useState({ accessibility: false, notification: false, battery: false });
   const [pf, setPf] = useState({ enabled: true, yoff: 0, width: 120, height: 34 });
@@ -143,15 +149,16 @@ export default function IslandSetup() {
   const all = st.accessibility && st.notification;
 
   return (
-    <Modal visible={open} animationType="slide" onRequestClose={() => setOpen(false)} statusBarTranslucent>
-      <View style={{ flex: 1, backgroundColor: t.bg, paddingTop: insets.top, paddingBottom: insets.bottom }}>
+    <Modal visible={open} animationType="slide" onRequestClose={() => setOpen(false)} statusBarTranslucent navigationBarTranslucent>
+      <SafeAreaProvider style={{ flex: 1 }}>
+      <SafePage t={t}>
         <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, height: 52 }}>
           <TouchableOpacity onPress={() => setOpen(false)} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
             <Ionicons name="chevron-down" size={28} color={t.text} />
           </TouchableOpacity>
           <Text style={{ color: t.text, fontSize: 18, fontWeight: '800' }}>Dynamic Island</Text>
         </View>
-        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
           {!Island ? (
             <Text style={{ color: t.muted }}>This build does not include the Island. Install the newest build.</Text>
           ) : (
@@ -235,7 +242,8 @@ export default function IslandSetup() {
             </>
           )}
         </ScrollView>
-      </View>
+      </SafePage>
+      </SafeAreaProvider>
     </Modal>
   );
 }
