@@ -19,7 +19,7 @@ import { WebView } from 'react-native-webview';
 import * as Clipboard from 'expo-clipboard';
 import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { loadSettings } from '../library';
 import { getTheme } from '../theme';
 import { cleanTitle } from '../utils';
@@ -65,7 +65,17 @@ function Btn({ t, icon, label, onPress, alt, disabled, style }) {
   );
 }
 
-function Screen({ t, title, onClose, right, children }) {
+// Inside a Modal the phone gives a separate window, so the screen measures its own safe area here
+// (the top bar, and the bottom navigation buttons). That keeps everything above the navigation buttons.
+function Screen(props) {
+  return (
+    <SafeAreaProvider style={{ flex: 1 }}>
+      <ScreenInner {...props} />
+    </SafeAreaProvider>
+  );
+}
+
+function ScreenInner({ t, title, onClose, right, children }) {
   const insets = useSafeAreaInsets();
   return (
     <View style={{ flex: 1, backgroundColor: t.bg, paddingTop: insets.top, paddingBottom: insets.bottom }}>
@@ -126,7 +136,7 @@ function SongPicker({ t, visible, onClose, onPick, title }) {
   }, [items, q]);
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent navigationBarTranslucent>
       <Screen t={t} title={title || 'Choose a song'} onClose={onClose}>
         <TextInput
           value={q}
@@ -290,9 +300,9 @@ function YouTubeSheet({ t, visible, onClose, initialLink, onApplied }) {
   );
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent navigationBarTranslucent>
       <Screen t={t} title="YouTube link" onClose={onClose}>
-        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
           <View style={{ flexDirection: 'row' }}>
             <TextInput
               value={url}
@@ -454,7 +464,7 @@ function TagEditor({ t, visible, onClose }) {
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent navigationBarTranslucent>
       <Screen
         t={t}
         title="Tag editor"
