@@ -87,7 +87,18 @@ jobs:
           cp -r ../old-music/src src
           mkdir -p src/tools
           cp ../src/tools/* src/tools/
-          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser
+          # the splash video: put your video (.mp4) in the main folder of the repo. With no video there, the app just opens without it
+          mkdir -p assets
+          SPLASH_VIDEO=$(find .. -maxdepth 1 -iname '*.mp4' | head -1)
+          if [ -n "$SPLASH_VIDEO" ]; then
+            cp "$SPLASH_VIDEO" assets/splash.mp4
+            echo "module.exports = require('../../assets/splash.mp4');" > src/tools/splashSource.js
+            echo "Splash video found: $SPLASH_VIDEO"
+          else
+            echo "module.exports = null;" > src/tools/splashSource.js
+            echo "No splash video in the repo, skipping it."
+          fi
+          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser expo-video
           npx expo install --fix
           npm install react-native-track-player@4.1.2
           # track-player's Kotlin code breaks with the newest React Native (Bundle? vs Bundle), so we fix those 2 lines here
