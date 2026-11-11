@@ -1,63 +1,50 @@
-// The splash video. It covers the whole screen on top of the app, plays the first moment of your video,
+// The splash animation. It covers the whole screen on top of the app, plays your Lottie animation,
 // then fades away and shows the app that was loading underneath.
-// The video comes from splashSource.js, which the build creates by itself (it is empty when there is no video in the repo).
+// splashSource.js is created by the build from your splash.json (it is empty when there is no splash.json).
 import React, { useEffect, useRef, useState } from 'react';
 import { Animated, StyleSheet } from 'react-native';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import source from './splashSource';
+import LottieView from 'lottie-react-native';
+import animation from './splashSource';
 
-// how long the splash stays on screen, in milliseconds (1500 = 1.5 seconds)
-const SHOW_MS = 1500;
+// how fast the animation plays: 1 = normal speed (4.4 seconds), 2 = twice as fast (2.2 seconds)
+const SPEED = 2;
 // how long the fade-out takes, in milliseconds
 const FADE_MS = 300;
+// safety: the splash is removed after this many milliseconds, whatever happens
+const MAX_MS = 6000;
 
-function Player({ onDone }) {
+export default function SplashVideo() {
+  const [gone, setGone] = useState(!animation);
   const fade = useRef(new Animated.Value(1)).current;
-  const player = useVideoPlayer(source, (p) => {
-    p.loop = false;
-    p.muted = true;
-    p.play();
-  });
+  const closing = useRef(false);
+
+  const finish = () => {
+    if (closing.current) return;
+    closing.current = true;
+    Animated.timing(fade, { toValue: 0, duration: FADE_MS, useNativeDriver: true }).start(() => setGone(true));
+  };
 
   useEffect(() => {
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      Animated.timing(fade, { toValue: 0, duration: FADE_MS, useNativeDriver: true }).start(() => onDone());
-    };
-    const timer = setTimeout(finish, SHOW_MS);
-    const subs = [];
-    try {
-      subs.push(player.addListener('playToEnd', finish));
-      // if the video can't be loaded for some reason, don't hold the app back
-      subs.push(player.addListener('statusChange', (e) => {
-        if (e && e.status === 'error') finish();
-      }));
-    } catch (e) {}
-    return () => {
-      clearTimeout(timer);
-      subs.forEach((s) => s && s.remove && s.remove());
-    };
+    if (!animation) return undefined;
+    const timer = setTimeout(finish, MAX_MS);
+    return () => clearTimeout(timer);
   }, []);
+
+  if (gone) return null;
 
   return (
     <Animated.View style={[styles.cover, { opacity: fade }]}>
-      <VideoView
-        player={player}
+      <LottieView
+        source={animation}
+        autoPlay
+        loop={false}
+        speed={SPEED}
+        resizeMode="cover"
         style={StyleSheet.absoluteFill}
-        contentFit="cover"
-        nativeControls={false}
-        surfaceType="textureView"
+        onAnimationFinish={finish}
       />
     </Animated.View>
   );
-}
-
-export default function SplashVideo() {
-  const [gone, setGone] = useState(!source);
-  if (gone) return null;
-  return <Player onDone={() => setGone(true)} />;
 }
 
 const styles = StyleSheet.create({
