@@ -172,6 +172,20 @@ jobs:
           </resources>
           XML
 
+            # the app's own startup screen (the old concentric circles + the gray flash): make it plain black, so only your animation shows
+            for F in $(find android/app/src/main/res -type f -name 'splashscreen_logo.*'); do
+              D=$(dirname "$F")
+              rm -f "$F"
+              echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=' | base64 -d > "$D/splashscreen_logo.png"
+            done
+            for F in $(find android/app/src/main/res -type f -path '*values*' -name 'colors.xml'); do
+              sed -i 's#<color name="splashscreen_background">[^<]*</color>#<color name="splashscreen_background">\#000000</color>#' "$F"
+            done
+            ST=android/app/src/main/res/values/styles.xml
+            sed -i '/android:windowBackground/d' "$ST"
+            sed -i '/<style name="AppTheme"/a\    <item name="android:windowBackground">@android:color/black</item>' "$ST"
+            echo "Startup screen check:"; grep -rn "splashscreen_background" android/app/src/main/res/values*/colors.xml || true; grep -n "windowBackground" "$ST" || echo "WARNING: window background was not set"
+
             MA=$(find android/app/src/main/java -name 'MainApplication.*' | head -1)
             if grep -q "EightDPackage" "$MA"; then return; fi
             sed -i 's/PackageList(this).packages.apply {/&\n              add(com.mymusic.player.EightDPackage())/' "$MA"
