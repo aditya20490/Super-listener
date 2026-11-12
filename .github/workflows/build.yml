@@ -87,16 +87,7 @@ jobs:
           cp -r ../old-music/src src
           mkdir -p src/tools
           cp ../src/tools/* src/tools/
-          # the splash animation: put your Lottie file, named splash.json, in the main folder of the repo. With none there, the app just opens without it
-          if [ -f ../splash.json ]; then
-            cp ../splash.json src/tools/splash.json
-            echo "module.exports = require('./splash.json');" > src/tools/splashSource.js
-            echo "Splash animation found."
-          else
-            echo "module.exports = null;" > src/tools/splashSource.js
-            echo "No splash.json in the repo, skipping it."
-          fi
-          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser lottie-react-native
+          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser
           npx expo install --fix
           npm install react-native-track-player@4.1.2
           # track-player's Kotlin code breaks with the newest React Native (Bundle? vs Bundle), so we fix those 2 lines here
@@ -171,20 +162,6 @@ jobs:
               <string name="island_desc">Draws the music pill (Dynamic Island) on top of other apps. It does not read or collect anything from your screen.</string>
           </resources>
           XML
-
-            # the app's own startup screen (the old concentric circles + the gray flash): make it plain black, so only your animation shows
-            for F in $(find android/app/src/main/res -type f -name 'splashscreen_logo.*'); do
-              D=$(dirname "$F")
-              rm -f "$F"
-              echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=' | base64 -d > "$D/splashscreen_logo.png"
-            done
-            for F in $(find android/app/src/main/res -type f -path '*values*' -name 'colors.xml'); do
-              sed -i 's#<color name="splashscreen_background">[^<]*</color>#<color name="splashscreen_background">\#000000</color>#' "$F"
-            done
-            ST=android/app/src/main/res/values/styles.xml
-            sed -i '/android:windowBackground/d' "$ST"
-            sed -i '/<style name="AppTheme"/a\    <item name="android:windowBackground">@android:color/black</item>' "$ST"
-            echo "Startup screen check:"; grep -rn "splashscreen_background" android/app/src/main/res/values*/colors.xml || true; grep -n "windowBackground" "$ST" || echo "WARNING: window background was not set"
 
             MA=$(find android/app/src/main/java -name 'MainApplication.*' | head -1)
             if grep -q "EightDPackage" "$MA"; then return; fi
