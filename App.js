@@ -6,7 +6,6 @@ import MusicApp from './MusicApp';
 import Tools from './src/tools/Tools';
 import IslandSetup from './src/tools/IslandSetup';
 import MkaScreen from './src/tools/MkaScreen';
-import SplashVideo from './src/tools/SplashVideo';
 
 export default function App() {
   const [k, setK] = useState(0);
@@ -18,8 +17,6 @@ export default function App() {
         <Tools onChanged={() => setK((n) => n + 1)} />
         <IslandSetup />
         <MkaScreen />
-        {/* the splash video sits on top for a moment while the app loads underneath, then fades away */}
-        <SplashVideo />
       </View>
     </SafeAreaProvider>
   );
