@@ -87,7 +87,7 @@ jobs:
           cp -r ../old-music/src src
           mkdir -p src/tools
           cp ../src/tools/* src/tools/
-          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser
+          npx expo install expo-media-library expo-file-system expo-image-picker expo-linear-gradient react-native-safe-area-context @expo/vector-icons expo-font @react-native-async-storage/async-storage expo-clipboard react-native-webview expo-web-browser expo-splash-screen
           npx expo install --fix
           npm install react-native-track-player@4.1.2
           # track-player's Kotlin code breaks with the newest React Native (Bundle? vs Bundle), so we fix those 2 lines here
@@ -95,6 +95,11 @@ jobs:
           sed -i -e 's/\.tracks\[index\]\.originalItem))/.tracks[index].originalItem ?: android.os.Bundle()))/' -e 's/^\( *musicService\.tracks\[musicService\.getCurrentTrackIndex()\]\.originalItem\)$/\1 ?: android.os.Bundle()/' "$MM"
           echo "Patched lines:"; grep -n "originalItem" "$MM" || true
           npm install @missingcore/react-native-metadata-retriever@^3.2.1 || echo "Song details library failed to install, continuing without it"
+
+      - name: Make the start screen files (plain black, with your symbol)
+        run: |
+          cd musicapp
+          node ../make-splash.js
 
       - name: Set app name, package and permissions
         env:
@@ -123,7 +128,11 @@ jobs:
             'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
             'android.permission.INTERNET'
           ];
-          cfg.expo.plugins = ['expo-media-library'];
+          cfg.expo.plugins = [
+            'expo-media-library',
+            ['expo-splash-screen', { backgroundColor: '#000000', image: './assets/splash-blank.png', imageWidth: 200 }]
+          ];
+          delete cfg.expo.splash;
           fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
           "
 
