@@ -31,9 +31,9 @@ function StartScreen({ onDone }) {
     started.current = true;
     hideNativeSplash();
     Animated.sequence([
-      Animated.timing(logo, { toValue: 1, duration: 400, useNativeDriver: true }),
-      Animated.delay(250),
-      Animated.timing(cover, { toValue: 0, duration: 350, useNativeDriver: true }),
+      Animated.timing(logo, { toValue: 1, duration: 150, useNativeDriver: true }),
+      Animated.delay(0),
+      Animated.timing(cover, { toValue: 0, duration: 220, useNativeDriver: true }),
     ]).start(() => onDone());
   };
 
