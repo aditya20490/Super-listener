@@ -347,6 +347,20 @@ export default function FinderScreen() {
     setTimeout(() => setCopied(''), 1800);
   };
 
+  // One tap on a song's copy button puts its Apple Music link on the clipboard.
+  // The link is marked as already seen, so the clipboard watcher does not pop Music Finder open for it later.
+  const copySongLink = async (url) => {
+    if (!url) return;
+    const l = normaliseLink(url);
+    if (l) {
+      lastClip.current = l;
+      try {
+        await AsyncStorage.setItem(LAST_CLIP_KEY, l);
+      } catch (e) {}
+    }
+    copyLink(url);
+  };
+
   // ---------- lyrics ----------
   const searchLyrics = (qIn) => {
     const q = String(qIn === undefined ? lyricQ : qIn).trim();
@@ -613,6 +627,16 @@ export default function FinderScreen() {
                   style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: line }}
                 >
                   <Text style={{ color: t.text, fontWeight: '600', fontSize: 14 }}>{playingId === s.id ? 'Stop' : 'Preview'}</Text>
+                </TouchableOpacity>
+              ) : null}
+              {s.apple ? (
+                <TouchableOpacity
+                  onPress={() => copySongLink(s.apple)}
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                  style={{ width: 40, height: 40, borderRadius: 10, backgroundColor: line, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Ionicons name={copied === s.apple ? 'checkmark' : 'copy-outline'} size={19} color={copied === s.apple ? t.accent : t.text} />
                 </TouchableOpacity>
               ) : null}
             </TouchableOpacity>
