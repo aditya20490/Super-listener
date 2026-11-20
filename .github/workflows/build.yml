@@ -64,6 +64,12 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      - name: Keep the voice downloads between builds (so only the first build downloads them)
+        uses: actions/cache@v4
+        with:
+          path: tts-cache
+          key: tts-kokoro-v1_0-sherpa-1.13.7
+
       - name: Pack the tag editor page
         run: node make-tag-editor.js
 
@@ -144,6 +150,9 @@ jobs:
           add_native() {
             # Music Finder: pulls the Task Automator engine into the Android project and registers its bridge
             node ../link-finder.js || exit 1
+
+            # Text to Speech: the offline Kokoro voices. If this fails, the app is still built, just without voices.
+            node ../link-tts.js || echo "WARNING: the voice engine could not be added, building without it"
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
             cp ../old-music/native-android/*.kt "$K/"
@@ -177,38 +186,62 @@ jobs:
             sed -i 's/PackageList(this).packages.apply {/&\n              add(com.mymusic.player.EightDPackage())/' "$MA"
             echo "MainApplication check:"; grep -n "EightDPackage" "$MA" || echo "WARNING: native package was not registered"
           }
-          cd musicapp
-          npx expo prebuild --platform android
-          add_native
-          printf "$GRADLE_PROPS" >> android/gradle.properties
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a 2>&1 | tee /tmp/gradle1.log
-          STATUS=${PIPESTATUS[0]}
-          cd ../..
-          if [ "$STATUS" -eq 0 ]; then
-            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED." > release_notes.md
+          # one full build attempt in a fresh Android project (uses SKIP_TTS to leave the voices out)
+          build_once() (
+            cd musicapp
+            rm -rf android
+            npx expo prebuild --platform android
+            add_native
+            printf "$GRADLE_PROPS" >> android/gradle.properties
+            cd android
+            chmod +x gradlew
+            ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a 2>&1 | tee "$1"
+            exit ${PIPESTATUS[0]}
+          )
+          error_summary() {
+            echo '```'
+            grep -E "^e: " "$1" | head -15
+            sed -n '/What went wrong/,/Try:/p' "$1" | head -30
+            echo '```'
+          }
+
+          # attempt 1: everything (song details library + offline voices)
+          unset SKIP_TTS
+          build_once /tmp/gradle1.log
+          if [ "$?" -eq 0 ]; then
+            if [ -f musicapp/android/app/src/main/java/com/mymusic/player/TtsModule.kt ]; then
+              VOICES="The offline voices (Kokoro Text to Speech) are INCLUDED."
+            else
+              VOICES="The offline voices (Kokoro Text to Speech) are NOT included, they could not be downloaded or linked. Look at the 'Build APK' step log."
+            fi
+            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED. $VOICES" > release_notes.md
             exit 0
           fi
-          echo "First build failed, trying again without the song details library"
+
+          # attempt 2: without the voices, keeping the song details library
+          echo "First build failed, trying again without the offline voices"
+          export SKIP_TTS=1
+          build_once /tmp/gradle2.log
+          if [ "$?" -eq 0 ]; then
+            {
+              echo "Build $GITHUB_RUN_NUMBER: the song details library is INCLUDED. The offline voices (Kokoro Text to Speech) are NOT included, because the first build failed with them."
+              echo ""
+              echo "Error summary:"
+              error_summary /tmp/gradle1.log
+            } > release_notes.md
+            exit 0
+          fi
+
+          # attempt 3: without the voices and without the song details library
+          echo "Second build failed, trying again without the song details library too"
           {
-            echo "Build $GITHUB_RUN_NUMBER: the song details library was NOT included, because the first build failed."
+            echo "Build $GITHUB_RUN_NUMBER: the song details library was NOT included, and the offline voices were NOT included, because the earlier builds failed."
             echo ""
-            echo "Error summary:"
-            echo '```'
-            grep -E "^e: " /tmp/gradle1.log | head -15
-            sed -n '/What went wrong/,/Try:/p' /tmp/gradle1.log | head -30
-            echo '```'
+            echo "Error summary (build without the voices):"
+            error_summary /tmp/gradle2.log
           } > release_notes.md
-          cd musicapp
-          npm uninstall @missingcore/react-native-metadata-retriever
-          rm -rf android
-          npx expo prebuild --platform android
-          add_native
-          printf "$GRADLE_PROPS" >> android/gradle.properties
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+          (cd musicapp && npm uninstall @missingcore/react-native-metadata-retriever)
+          build_once /tmp/gradle3.log
           exit $?
 
       - name: Publish APK to Releases
