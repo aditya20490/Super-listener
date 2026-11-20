@@ -324,7 +324,9 @@ export default function AudioEditorScreen() {
     if (!AE || !info) return undefined;
     let alive = true;
     const n = Math.max(30, Math.floor(width / 3));
-    AE.getPeaks(view.start, view.end, n, false)
+    // started inside a promise, so a problem in the native call can never crash the app
+    Promise.resolve()
+      .then(() => AE.getPeaks(view.start, view.end, n, false))
       .then((p) => {
         if (alive) setPeaks(p);
       })
