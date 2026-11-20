@@ -3,7 +3,8 @@
 //  - old-music/App.js: adds a hamburger menu button at the top left of the header, and keeps your listening
 //    history backed up outside the app (src/tools/persist.js)
 //  - old-music/src/EditSong.js: adds an info button explaining that the edits are inside the app only
-//  - src/tools/FinderScreen.js: adds "Audio Editor" to the hamburger menu
+//  - src/tools/FinderScreen.js: adds "Audio Editor" and "Text to Speech" to the hamburger menu
+//  - App.js (root): also mounts the Text to Speech screen
 // Your my-music-app repo is not changed.
 const fs = require('fs');
 
@@ -28,6 +29,8 @@ patch('App.js', [
   ['<FinderScreen />', '<MkaScreen />', '\n        <FinderScreen />', 'after'],
   ["import AudioEditorScreen", "import FinderScreen from './src/tools/FinderScreen';", "\nimport AudioEditorScreen from './src/tools/AudioEditorScreen';", 'after'],
   ['<AudioEditorScreen />', '<FinderScreen />', '\n        <AudioEditorScreen />', 'after'],
+  ["import TtsScreen", "import AudioEditorScreen from './src/tools/AudioEditorScreen';", "\nimport TtsScreen from './src/tools/TtsScreen';", 'after'],
+  ['<TtsScreen />', '<AudioEditorScreen />', '\n        <TtsScreen />', 'after'],
 ]);
 
 // the hamburger menu: a new "Audio" section with the Audio Editor
@@ -42,6 +45,18 @@ patch('src/tools/FinderScreen.js', [
     "menuItem('editor'",
     "{menuItem('automate', 'flash', 'Automate', 'Open Task Automator')}",
     "\n            <Text style={{ color: t.accent, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', marginHorizontal: 12, marginTop: 22, marginBottom: 6 }}>\n              Audio\n            </Text>\n            {menuItem('editor', 'cut', 'Audio Editor', 'Trim, fade, loop and more')}",
+    'after',
+  ],
+  [
+    "emit('openTts')",
+    "const wanted = info.tab || 'songs';",
+    "\n      if (wanted === 'tts') {\n        setMenu(false);\n        DeviceEventEmitter.emit('openTts');\n        return;\n      }",
+    'after',
+  ],
+  [
+    "menuItem('tts'",
+    "{menuItem('editor', 'cut', 'Audio Editor', 'Trim, fade, loop and more')}",
+    "\n            {menuItem('tts', 'volume-high', 'Text to Speech', 'Offline voices, on your phone')}",
     'after',
   ],
 ]);
