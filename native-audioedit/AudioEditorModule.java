@@ -5,8 +5,10 @@ import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.media.MediaMuxer;
 import android.net.Uri;
 
 import com.facebook.react.bridge.Arguments;
@@ -267,6 +269,8 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                     promise.reject("E_MEMORY", "This song is too big for the editor on this phone.");
                 } catch (Exception e) {
                     promise.reject("E_DECODE", e.getMessage() == null ? "Could not read this song." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_DECODE", "Could not read this song.");
                 }
             }
         });
@@ -323,6 +327,8 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                     promise.reject("E_MEMORY", "That result is too big for this phone. Try a shorter length.");
                 } catch (Exception e) {
                     promise.reject("E_RENDER", e.getMessage() == null ? "Could not apply that edit." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_RENDER", "Could not apply that edit.");
                 }
             }
         });
@@ -397,6 +403,8 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                     promise.reject("E_MEMORY", "Not enough memory to analyze this song.");
                 } catch (Exception e) {
                     promise.reject("E_LOOP", e.getMessage() == null ? "The loop search failed." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_LOOP", "The loop search failed.");
                 }
             }
         });
@@ -476,6 +484,17 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
             int re = endSec < 0 ? frames : (int) Math.max(s0 + 1, Math.min(frames, Math.round(endSec * r)));
             int rs = loop ? (int) Math.max(0, Math.min(re - 1, Math.round(loopStartSec * r))) : s0;
             if (loop && s0 < rs) s0 = rs;
+            startTrack(d, c, r, s0, rs, re, loop);
+            promise.resolve(true);
+        } catch (Exception e) {
+            promise.reject("E_PLAY", e.getMessage() == null ? "Could not play." : e.getMessage());
+        }
+    }
+
+    /** Starts playing d (frames s0 .. re; with loop = true it jumps from re back to rs again and again). */
+    private void startTrack(short[] d, int c, int r, int s0, int rs, int re, boolean loop) throws Exception {
+        {
+            stopPlayback();
             int mask = c == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
             int minBuf = AudioTrack.getMinBufferSize(r, mask, AudioFormat.ENCODING_PCM_16BIT);
             int bufSize = Math.max(minBuf, r * c * 2 / 4);
@@ -541,9 +560,6 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                 writer = w;
             }
             w.start();
-            promise.resolve(true);
-        } catch (Exception e) {
-            promise.reject("E_PLAY", e.getMessage() == null ? "Could not play." : e.getMessage());
         }
     }
 
@@ -574,9 +590,277 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
         b.putInt(v);
     }
 
-    /** Writes the current audio as a WAV file in the app's cache and resolves with its path. */
+    private File exportDir() {
+        File dir = new File(getReactApplicationContext().getCacheDir(), "audioedit");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    private static String safeName(String name) {
+        String safe = name == null ? "" : name.replaceAll("[^A-Za-z0-9._ -]", "_");
+        if (safe.trim().length() == 0) safe = "edited";
+        return safe;
+    }
+
+    private void progress(double fraction, String stage) {
+        WritableMap m = Arguments.createMap();
+        m.putDouble("fraction", fraction);
+        m.putString("stage", stage);
+        emit("AudioEditorProgress", m);
+    }
+
+    /**
+     * Writes the current audio as a WAV file in the app's cache and resolves with its path. The loop edit makes one
+     * cycle; it is repeated here (loops times, with an optional fade out) a piece at a time, so it needs no memory.
+     */
     @ReactMethod
-    public void exportWav(final String name, final Promise promise) {
+    public void exportWav(final String name, final double loops, final double fadeSec, final Promise promise) {
+        pool.execute(new Runnable() {
+            public void run() {
+                try {
+                    short[] d;
+                    int c, r;
+                    synchronized (lock) {
+                        d = cur;
+                        c = ch;
+                        r = sr;
+                    }
+                    if (d == null || d.length < c) {
+                        promise.reject("E_NONE", "Open a song first.");
+                        return;
+                    }
+                    LoopStream ls = new LoopStream(d, c, r, Math.max(1L, Math.round(loops)), fadeSec);
+                    long total = ls.totalFrames();
+                    long dataBytes = total * c * 2L;
+                    if (dataBytes > 4000000000L) {
+                        promise.reject("E_EXPORT", "This is too long for a WAV file. Choose M4A instead.");
+                        return;
+                    }
+                    File f = new File(exportDir(), safeName(name) + ".wav");
+                    BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(f), 1 << 16);
+                    try {
+                        ByteBuffer h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN);
+                        h.put(new byte[]{'R', 'I', 'F', 'F'});
+                        le(h, (int) (36 + dataBytes));
+                        h.put(new byte[]{'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+                        le(h, 16);
+                        h.putShort((short) 1);
+                        h.putShort((short) c);
+                        le(h, r);
+                        le(h, r * c * 2);
+                        h.putShort((short) (c * 2));
+                        h.putShort((short) 16);
+                        h.put(new byte[]{'d', 'a', 't', 'a'});
+                        le(h, (int) dataBytes);
+                        out.write(h.array());
+                        final int piece = 16384;
+                        short[] buf = new short[piece * c];
+                        ByteBuffer chunk = ByteBuffer.allocate(piece * c * 2).order(ByteOrder.LITTLE_ENDIAN);
+                        long pos = 0;
+                        int lastPct = -1;
+                        while (pos < total) {
+                            int n = (int) Math.min((long) piece, total - pos);
+                            ls.fill(pos, n, buf);
+                            chunk.clear();
+                            chunk.asShortBuffer().put(buf, 0, n * c);
+                            out.write(chunk.array(), 0, n * c * 2);
+                            pos += n;
+                            int pct = (int) (pos * 100 / total);
+                            if (pct != lastPct) {
+                                lastPct = pct;
+                                progress(pos / (double) total, "Writing the WAV file");
+                            }
+                        }
+                        out.flush();
+                    } finally {
+                        out.close();
+                    }
+                    promise.resolve(f.getAbsolutePath());
+                } catch (OutOfMemoryError e) {
+                    promise.reject("E_MEMORY", "Not enough memory to save this.");
+                } catch (Exception e) {
+                    promise.reject("E_EXPORT", e.getMessage() == null ? "Could not save the file." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_EXPORT", "Could not save the file.");
+                }
+            }
+        });
+    }
+
+    /** Same as exportWav, but compressed to AAC inside an .m4a file (small). */
+    @ReactMethod
+    public void exportM4a(final String name, final double loops, final double fadeSec, final Promise promise) {
+        pool.execute(new Runnable() {
+            public void run() {
+                MediaCodec enc = null;
+                MediaMuxer mux = null;
+                boolean muxStarted = false;
+                File f = null;
+                boolean ok = false;
+                try {
+                    short[] d;
+                    int c, r;
+                    synchronized (lock) {
+                        d = cur;
+                        c = ch;
+                        r = sr;
+                    }
+                    if (d == null || d.length < c) {
+                        promise.reject("E_NONE", "Open a song first.");
+                        return;
+                    }
+                    LoopStream ls = new LoopStream(d, c, r, Math.max(1L, Math.round(loops)), fadeSec);
+                    long total = ls.totalFrames();
+                    f = new File(exportDir(), safeName(name) + ".m4a");
+                    if (f.exists()) f.delete();
+
+                    MediaFormat fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, r, c);
+                    fmt.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+                    fmt.setInteger(MediaFormat.KEY_BIT_RATE, c == 1 ? 128000 : 192000);
+                    fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536);
+                    enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
+                    enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    enc.start();
+                    mux = new MediaMuxer(f.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+
+                    MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
+                    short[] buf = new short[4096 * c];
+                    long pos = 0;
+                    int track = -1;
+                    int lastPct = -1;
+                    boolean inDone = false, outDone = false;
+                    while (!outDone) {
+                        if (!inDone) {
+                            int ii = enc.dequeueInputBuffer(10000);
+                            if (ii >= 0) {
+                                ByteBuffer ib = enc.getInputBuffer(ii);
+                                ib.clear();
+                                long pts = pos * 1000000L / r;
+                                if (pos >= total) {
+                                    enc.queueInputBuffer(ii, 0, 0, pts, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                    inDone = true;
+                                } else {
+                                    int n = (int) Math.min(4096L, Math.min(total - pos, (long) (ib.capacity() / (2 * c))));
+                                    ls.fill(pos, n, buf);
+                                    ib.order(ByteOrder.nativeOrder());
+                                    ib.asShortBuffer().put(buf, 0, n * c);
+                                    enc.queueInputBuffer(ii, 0, n * c * 2, pts, 0);
+                                    pos += n;
+                                    int pct = (int) (pos * 100 / total);
+                                    if (pct != lastPct) {
+                                        lastPct = pct;
+                                        progress(pos / (double) total, "Making the M4A file");
+                                    }
+                                }
+                            }
+                        }
+                        int oi = enc.dequeueOutputBuffer(bi, 10000);
+                        if (oi == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            track = mux.addTrack(enc.getOutputFormat());
+                            mux.start();
+                            muxStarted = true;
+                        } else if (oi >= 0) {
+                            ByteBuffer ob = enc.getOutputBuffer(oi);
+                            if ((bi.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) bi.size = 0;
+                            if (bi.size > 0 && muxStarted && ob != null) {
+                                ob.position(bi.offset);
+                                ob.limit(bi.offset + bi.size);
+                                mux.writeSampleData(track, ob, bi);
+                            }
+                            enc.releaseOutputBuffer(oi, false);
+                            if ((bi.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true;
+                        }
+                    }
+                    if (muxStarted) {
+                        mux.stop();
+                        muxStarted = false;
+                    }
+                    ok = true;
+                    promise.resolve(f.getAbsolutePath());
+                } catch (OutOfMemoryError e) {
+                    promise.reject("E_MEMORY", "Not enough memory to save this.");
+                } catch (Exception e) {
+                    promise.reject("E_EXPORT", "Could not make the M4A file (" + (e.getMessage() == null ? "unknown problem" : e.getMessage()) + "). Try WAV instead.");
+                } catch (Throwable e) {
+                    promise.reject("E_EXPORT", "Could not make the M4A file. Try WAV instead.");
+                } finally {
+                    try {
+                        if (enc != null) {
+                            enc.stop();
+                            enc.release();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        if (mux != null) {
+                            if (muxStarted) mux.stop();
+                            mux.release();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    if (!ok && f != null) f.delete();
+                }
+            }
+        });
+    }
+
+    /** Deletes the files made for saving (they have been copied into the Music folder by then). */
+    @ReactMethod
+    public void clearExports(Promise promise) {
+        try {
+            File[] list = exportDir().listFiles();
+            if (list != null) {
+                for (File x : list) x.delete();
+            }
+        } catch (Exception ignored) {
+        }
+        promise.resolve(true);
+    }
+
+    // ---------------------------------------------------------------- waveform and loop check
+
+    /** The waveform: n bars (0..1) for the part from startSec to endSec of the current audio (or the original). */
+    @ReactMethod
+    public void getPeaks(double startSec, double endSec, int n, boolean original, Promise promise) {
+        try {
+            short[] d;
+            int c, r;
+            synchronized (lock) {
+                d = original ? orig : cur;
+                c = ch;
+                r = sr;
+            }
+            WritableArray arr = Arguments.createArray();
+            if (d == null || n <= 0 || c <= 0) {
+                promise.resolve(arr);
+                return;
+            }
+            int frames = d.length / c;
+            long s0 = Math.max(0, Math.min(frames, Math.round(startSec * r)));
+            long e0 = Math.max(s0, Math.min(frames, Math.round(endSec * r)));
+            for (int i = 0; i < n; i++) {
+                long a = s0 + (e0 - s0) * i / n;
+                long b = s0 + (e0 - s0) * (i + 1) / n;
+                if (b <= a) b = Math.min(frames, a + 1);
+                int p = 0;
+                long step = Math.max(1L, (b - a) / 64);
+                for (long f = a; f < b && f < frames; f += step) {
+                    for (int k = 0; k < c; k++) {
+                        int v = Math.abs((int) d[(int) (f * c + k)]);
+                        if (v > p) p = v;
+                    }
+                }
+                arr.pushDouble(p / 32768.0);
+            }
+            promise.resolve(arr);
+        } catch (Exception e) {
+            promise.reject("E_PEAKS", e.getMessage() == null ? "Could not draw the waveform." : e.getMessage());
+        }
+    }
+
+    /** Checks the picked part for looping: exact points, blend length and quality (see LoopMaker). */
+    @ReactMethod
+    public void analyzeSelection(final double startSec, final double endSec, final double xfSec, final boolean align, final Promise promise) {
         pool.execute(new Runnable() {
             public void run() {
                 try {
@@ -591,39 +875,58 @@ public class AudioEditorModule extends ReactContextBaseJavaModule {
                         promise.reject("E_NONE", "Open a song first.");
                         return;
                     }
-                    String safe = name.replaceAll("[^A-Za-z0-9._ -]", "_");
-                    if (safe.length() == 0) safe = "edited";
-                    File f = new File(getReactApplicationContext().getCacheDir(), safe + ".wav");
-                    long dataBytes = (long) d.length * 2;
-                    BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(f), 1 << 16);
-                    ByteBuffer h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN);
-                    h.put(new byte[]{'R', 'I', 'F', 'F'});
-                    le(h, (int) (36 + dataBytes));
-                    h.put(new byte[]{'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
-                    le(h, 16);
-                    h.putShort((short) 1);
-                    h.putShort((short) c);
-                    le(h, r);
-                    le(h, r * c * 2);
-                    h.putShort((short) (c * 2));
-                    h.putShort((short) 16);
-                    h.put(new byte[]{'d', 'a', 't', 'a'});
-                    le(h, (int) dataBytes);
-                    out.write(h.array());
-                    ByteBuffer chunk = ByteBuffer.allocate(1 << 16).order(ByteOrder.LITTLE_ENDIAN);
-                    int i = 0;
-                    while (i < d.length) {
-                        chunk.clear();
-                        int n = Math.min(d.length - i, chunk.capacity() / 2);
-                        for (int k = 0; k < n; k++) chunk.putShort(d[i + k]);
-                        out.write(chunk.array(), 0, n * 2);
-                        i += n;
-                    }
-                    out.flush();
-                    out.close();
-                    promise.resolve(f.getAbsolutePath());
+                    LoopMaker.Seam sm = LoopMaker.analyze(d, c, r, Math.round(startSec * r), Math.round(endSec * r), xfSec, align);
+                    WritableMap m = Arguments.createMap();
+                    m.putDouble("a", sm.a);
+                    m.putDouble("b", sm.b);
+                    m.putDouble("xf", sm.xf);
+                    m.putDouble("shiftMs", sm.shiftMs);
+                    m.putDouble("ncc", sm.ncc);
+                    m.putDouble("pre", sm.pre);
+                    m.putDouble("quality", sm.quality);
+                    promise.resolve(m);
+                } catch (OutOfMemoryError e) {
+                    promise.reject("E_MEMORY", "Not enough memory to check this part.");
                 } catch (Exception e) {
-                    promise.reject("E_EXPORT", e.getMessage() == null ? "Could not save the file." : e.getMessage());
+                    promise.reject("E_CHECK", e.getMessage() == null ? "Could not check this part." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_CHECK", "Could not check this part.");
+                }
+            }
+        });
+    }
+
+    /** Plays the loop (as it will sound when saved) again and again, so the seam can be heard. */
+    @ReactMethod
+    public void previewLoop(final double a, final double b, final double xf, final Promise promise) {
+        pool.execute(new Runnable() {
+            public void run() {
+                try {
+                    short[] d;
+                    int c, r;
+                    synchronized (lock) {
+                        d = cur;
+                        c = ch;
+                        r = sr;
+                    }
+                    if (d == null) {
+                        promise.resolve(false);
+                        return;
+                    }
+                    short[] body = LoopMaker.build(d, c, (int) Math.round(a), (int) Math.round(b), (int) Math.round(xf));
+                    int frames = body.length / c;
+                    if (frames < 1) {
+                        promise.resolve(false);
+                        return;
+                    }
+                    startTrack(body, c, r, 0, 0, frames, true);
+                    promise.resolve(true);
+                } catch (OutOfMemoryError e) {
+                    promise.reject("E_MEMORY", "Not enough memory to play this.");
+                } catch (Exception e) {
+                    promise.reject("E_PLAY", e.getMessage() == null ? "Could not play the loop." : e.getMessage());
+                } catch (Throwable e) {
+                    promise.reject("E_PLAY", "Could not play the loop.");
                 }
             }
         });
