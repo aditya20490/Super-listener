@@ -43,6 +43,18 @@ jobs:
           repository: ${{ github.repository_owner }}/Task-automater
           path: old-automator
 
+      - name: Get the Vocal Splitter code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/VocalSplitter
+          path: old-splitter
+
+      - name: Get the Voice Cloner code (read only, your old repo is not changed)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/voice-studio
+          path: old-voice
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -70,6 +82,12 @@ jobs:
           path: tts-cache
           key: tts-kokoro-v1_0-sherpa-1.13.7
 
+      - name: Keep the Vocal Splitter model between builds (so only the first build downloads it)
+        uses: actions/cache@v4
+        with:
+          path: studio-cache
+          key: studio-vocal-model-uvr-mdx-voc-ft-v1
+
       - name: Pack the tag editor page
         run: node make-tag-editor.js
 
@@ -80,6 +98,7 @@ jobs:
         run: |
           node make-finder.js
           node patch-finder.js
+          node patch-studio.js
 
       - name: Create the app project
         run: |
@@ -153,6 +172,9 @@ jobs:
 
             # Text to Speech: the offline Kokoro voices. If this fails, the app is still built, just without voices.
             node ../link-tts.js || echo "WARNING: the voice engine could not be added, building without it"
+            # Vocal Splitter + Voice Cloner inside the hamburger menu. If this fails, this build attempt stops and the next one is made without them.
+            node ../link-studio.js || exit 1
+
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
             cp ../old-music/native-android/*.kt "$K/"
@@ -205,8 +227,8 @@ jobs:
             echo '```'
           }
 
-          # attempt 1: everything (song details library + offline voices)
-          unset SKIP_TTS
+          # attempt 1: everything (song details library + offline voices + Vocal Splitter + Voice Cloner)
+          unset SKIP_TTS SKIP_STUDIO
           build_once /tmp/gradle1.log
           if [ "$?" -eq 0 ]; then
             if [ -f musicapp/android/app/src/main/java/com/mymusic/player/TtsModule.kt ]; then
@@ -214,17 +236,22 @@ jobs:
             else
               VOICES="The offline voices (Kokoro Text to Speech) are NOT included, they could not be downloaded or linked. Look at the 'Build APK' step log."
             fi
-            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED. $VOICES" > release_notes.md
+            if [ -f musicapp/android/app/src/main/java/com/mymusic/player/StudioAppsModule.kt ]; then
+              STUDIO="Vocal Splitter and Voice Cloner are INCLUDED."
+            else
+              STUDIO="Vocal Splitter and Voice Cloner are NOT included."
+            fi
+            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED. $VOICES $STUDIO" > release_notes.md
             exit 0
           fi
 
-          # attempt 2: without the voices, keeping the song details library
-          echo "First build failed, trying again without the offline voices"
-          export SKIP_TTS=1
+          # attempt 2: without Vocal Splitter and Voice Cloner (the same build as before they were added)
+          echo "First build failed, trying again without Vocal Splitter and Voice Cloner"
+          export SKIP_STUDIO=1
           build_once /tmp/gradle2.log
           if [ "$?" -eq 0 ]; then
             {
-              echo "Build $GITHUB_RUN_NUMBER: the song details library is INCLUDED. The offline voices (Kokoro Text to Speech) are NOT included, because the first build failed with them."
+              echo "Build $GITHUB_RUN_NUMBER: the song details library and the offline voices are INCLUDED. Vocal Splitter and Voice Cloner are NOT included, because the first build failed with them."
               echo ""
               echo "Error summary:"
               error_summary /tmp/gradle1.log
@@ -232,22 +259,25 @@ jobs:
             exit 0
           fi
 
-          # attempt 3: without the voices and without the song details library
-          echo "Second build failed, trying again without the song details library too"
-          {
-            echo "Build $GITHUB_RUN_NUMBER: the song details library was NOT included, and the offline voices were NOT included, because the earlier builds failed."
-            echo ""
-            echo "Error summary (build without the voices):"
-            error_summary /tmp/gradle2.log
-          } > release_notes.md
-          (cd musicapp && npm uninstall @missingcore/react-native-metadata-retriever)
+          # attempt 3: also without the offline voices
+          echo "Second build failed, trying again without the offline voices too"
+          export SKIP_TTS=1
           build_once /tmp/gradle3.log
-          exit $?
+          if [ "$?" -eq 0 ]; then
+            {
+              echo "Build $GITHUB_RUN_NUMBER: the song details library is INCLUDED. The offline voices, Vocal Splitter and Voice Cloner are NOT included, because the earlier builds failed."
+              echo ""
+              echo "Error summary (first build, with everything):"
+              error_summary /tmp/gradle1.log
+              echo ""
+              echo "Error summary (second build, without Vocal Splitter and Voice Cloner):"
+              error_summary /tmp/gradle2.log
+            } > release_notes.md
+            exit 0
+          fi
 
-      - name: Publish APK to Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          body_path: release_notes.md
-          files: musicapp/android/app/build/outputs/apk/release/app-release.apk
+          # attempt 4: also without the song details library
+          echo "Third build failed, trying again without the song details library too"
+          {
+            echo "Build $GITHUB_RUN_NUMBER: the song details library, the offline voices, Vocal Splitter and Voice Cloner were NOT included, because the earlier builds failed."
+            echo ""
