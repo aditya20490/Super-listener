@@ -135,7 +135,9 @@ try {
   console.log('Studio apps: Kotlin version ' + kotlin);
 
   // ONNX Runtime: both apps use it (Java side). The Text to Speech voices (sherpa-onnx) bring their own copy of the
-  // same native library, so only ONE copy may stay: the newest one, and the other is removed.
+  // same native library. The two copies can NOT be merged: the voices ask for the exact version stamp (for example
+  // "VERS_1.27.1") of the file they were built with. So both copies stay, and the voices' copy is renamed so the
+  // two files do not clash.
   const sherpa = 'android/app/libs/sherpa-onnx.aar';
   let sherpaV = null;
   if (fs.existsSync(sherpa)) {
@@ -177,6 +179,38 @@ try {
       return null;
     }
   }
+  // Renames the voices' own ONNX Runtime file to libortsherpa12.so, everywhere it is named inside the voice library's
+  // own files (same length on purpose, so nothing else in those files moves).
+  function renameVoiceRuntime() {
+    const tmp = path.resolve('../studio-sherpa-patch');
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp, { recursive: true });
+    const aarAbs = path.resolve(sherpa);
+    sh('unzip -q -o "' + aarAbs + '" "jni/arm64-v8a/*" -d "' + tmp + '"');
+    const dir = tmp + '/jni/arm64-v8a';
+    const OLD = Buffer.from('libonnxruntime.so\0');
+    const NEW = Buffer.from('libortsherpa12.so\0');
+    if (OLD.length !== NEW.length) throw new Error('internal: the two names must have the same length');
+    if (!fs.existsSync(dir + '/libonnxruntime.so')) throw new Error('libonnxruntime.so is not inside the voice library');
+    let total = 0;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.so')) continue;
+      const p = dir + '/' + f;
+      const b = fs.readFileSync(p);
+      let i = 0;
+      while ((i = b.indexOf(OLD, i)) >= 0) {
+        NEW.copy(b, i);
+        i += OLD.length;
+        total++;
+      }
+      fs.writeFileSync(p, b);
+    }
+    if (total < 2) throw new Error('could not find the library name inside the voice library files');
+    fs.renameSync(dir + '/libonnxruntime.so', dir + '/libortsherpa12.so');
+    sh('zip -q -d "' + aarAbs + '" "jni/arm64-v8a/*"');
+    sh('cd "' + tmp + '" && zip -q -r -X "' + aarAbs + '" jni');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
   let ort = '1.22.0'; // the newest of the two apps' own versions (Voice Cloner uses 1.22.0, Vocal Splitter 1.19.2)
   if (fs.existsSync(sherpa)) {
     if (sherpaV && cmp(sherpaV, ort) > 0) {
@@ -193,10 +227,10 @@ try {
     }
     if (sherpaV && cmp(ort, sherpaV.split('.').slice(0, 2).join('.') + '.0') < 0) die('the app ONNX Runtime is older than the voice library one');
     try {
-      sh('zip -q -d "' + sherpa + '" "jni/arm64-v8a/libonnxruntime.so"');
-      console.log('Studio apps: removed the voice library copy of libonnxruntime.so, ONNX Runtime ' + ort + ' is used for everything');
+      renameVoiceRuntime();
+      console.log('Studio apps: the voice library keeps its own ONNX Runtime (renamed to libortsherpa12.so), the two apps use ONNX Runtime ' + ort);
     } catch (e) {
-      die('could not remove the duplicate libonnxruntime.so from the voice library');
+      die('could not prepare the voice library: ' + (e && e.message ? e.message : e));
     }
   }
   console.log('Studio apps: ONNX Runtime ' + ort);
