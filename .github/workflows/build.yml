@@ -281,3 +281,37 @@ jobs:
           {
             echo "Build $GITHUB_RUN_NUMBER: the song details library, the offline voices, Vocal Splitter and Voice Cloner were NOT included, because the earlier builds failed."
             echo ""
+            echo "Error summary (first build, with everything):"
+            error_summary /tmp/gradle1.log
+            echo ""
+            echo "Error summary (second build, without Vocal Splitter and Voice Cloner):"
+            error_summary /tmp/gradle2.log
+            echo ""
+            echo "Error summary (third build, without the offline voices):"
+            error_summary /tmp/gradle3.log
+          } > release_notes.md
+          export SKIP_TTS=1 SKIP_STUDIO=1
+          (cd musicapp && npm uninstall @missingcore/react-native-metadata-retriever || true)
+          build_once /tmp/gradle4.log
+          BUILD_RESULT=$?
+          if [ "$BUILD_RESULT" -ne 0 ]; then
+            echo "ALL FOUR BUILD ATTEMPTS FAILED"
+            echo "---- first attempt errors ----";  error_summary /tmp/gradle1.log
+            echo "---- last attempt errors ----";   error_summary /tmp/gradle4.log
+          fi
+          exit $BUILD_RESULT
+
+      - name: Check the APK exists
+        run: |
+          APK=musicapp/android/app/build/outputs/apk/release/app-release.apk
+          ls -la "$APK"
+          test -s "$APK"
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body_path: release_notes.md
+          files: musicapp/android/app/build/outputs/apk/release/app-release.apk
+          make_latest: true
