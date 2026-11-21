@@ -158,15 +158,40 @@ try {
       return false;
     }
   }
+  // If the exact version the voices carry is not published (for example a patch release), use the closest published
+  // one with the same interface: the same minor version first, otherwise the closest one above it.
+  function mavenPick(wanted) {
+    try {
+      const xml = execSync('curl -s -L --max-time 60 https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/maven-metadata.xml', { maxBuffer: 16 * 1024 * 1024 }).toString();
+      const list = [];
+      const re = /<version>(\d+\.\d+\.\d+)<\/version>/g;
+      let m;
+      while ((m = re.exec(xml))) list.push(m[1]);
+      list.sort(cmp);
+      const minor = wanted.split('.').slice(0, 2).join('.');
+      const sameMinor = list.filter((v) => v.split('.').slice(0, 2).join('.') === minor);
+      if (sameMinor.length) return sameMinor[sameMinor.length - 1];
+      const above = list.filter((v) => cmp(v, minor + '.0') >= 0);
+      return above.length ? above[0] : null;
+    } catch (e) {
+      return null;
+    }
+  }
   let ort = '1.22.0'; // the newest of the two apps' own versions (Voice Cloner uses 1.22.0, Vocal Splitter 1.19.2)
   if (fs.existsSync(sherpa)) {
     if (sherpaV && cmp(sherpaV, ort) > 0) {
-      if (!mavenHas(sherpaV)) die('ONNX Runtime ' + sherpaV + ' (needed by the voices) was not found, cannot merge the libraries');
-      ort = sherpaV;
+      if (mavenHas(sherpaV)) {
+        ort = sherpaV;
+      } else {
+        const alt = mavenPick(sherpaV);
+        if (!alt) die('ONNX Runtime ' + sherpaV + ' (needed by the voices) was not found, and no close version could be found either');
+        console.log('Studio apps: ONNX Runtime ' + sherpaV + ' is not published, using the closest one: ' + alt);
+        ort = alt;
+      }
     } else if (!sherpaV && mavenHas('1.23.2')) {
       ort = '1.23.2';
     }
-    if (sherpaV && cmp(ort, sherpaV) < 0) die('the app ONNX Runtime is older than the voice library one');
+    if (sherpaV && cmp(ort, sherpaV.split('.').slice(0, 2).join('.') + '.0') < 0) die('the app ONNX Runtime is older than the voice library one');
     try {
       sh('zip -q -d "' + sherpa + '" "jni/arm64-v8a/libonnxruntime.so"');
       console.log('Studio apps: removed the voice library copy of libonnxruntime.so, ONNX Runtime ' + ort + ' is used for everything');
