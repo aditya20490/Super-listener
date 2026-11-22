@@ -100,6 +100,7 @@ jobs:
           node patch-finder.js
           node patch-studio.js
           node patch-stats.js
+          node patch-karaoke.js || echo "WARNING: the Karaoke button could not be added, building without it"
 
       - name: Create the app project
         run: |
@@ -177,6 +178,8 @@ jobs:
             node ../link-tts.js || echo "WARNING: the voice engine could not be added, building without it"
             # Vocal Splitter + Voice Cloner inside the hamburger menu. If this fails, this build attempt stops and the next one is made without them.
             node ../link-studio.js || exit 1
+            # Karaoke (the K button): uses the Vocal Splitter's engine. If it is not linked, or the build fails with it, it is dropped on its own.
+            node ../link-karaoke.js || echo "WARNING: Karaoke could not be added, building without it"
 
             K=android/app/src/main/java/com/mymusic/player
             mkdir -p "$K"
@@ -231,7 +234,7 @@ jobs:
           }
 
           # attempt 1: everything (song details library + offline voices + Vocal Splitter + Voice Cloner)
-          unset SKIP_TTS SKIP_STUDIO
+          unset SKIP_TTS SKIP_STUDIO SKIP_KARAOKE
           build_once /tmp/gradle1.log
           if [ "$?" -eq 0 ]; then
             if [ -f musicapp/android/app/src/main/java/com/mymusic/player/TtsModule.kt ]; then
@@ -244,9 +247,29 @@ jobs:
             else
               STUDIO="Vocal Splitter and Voice Cloner are NOT included."
             fi
-            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED. $VOICES $STUDIO" > release_notes.md
+            if [ -f musicapp/android/app/src/main/java/com/mymusic/player/KaraokeModule.kt ]; then
+              KARAOKE="Karaoke (the K button) is INCLUDED."
+            else
+              KARAOKE="Karaoke (the K button) is NOT included."
+            fi
+            echo "Build $GITHUB_RUN_NUMBER: the song details library (artist, album, covers, lyrics) is INCLUDED. $VOICES $STUDIO $KARAOKE" > release_notes.md
             exit 0
           fi
+
+          # attempt 1b: everything except Karaoke (Karaoke is the newest part: if it breaks the build, only it is dropped)
+          echo "First build failed, trying again without Karaoke"
+          export SKIP_KARAOKE=1
+          build_once /tmp/gradle1b.log
+          if [ "$?" -eq 0 ]; then
+            {
+              echo "Build $GITHUB_RUN_NUMBER: everything is INCLUDED except Karaoke (the K button), because the first build failed with it."
+              echo ""
+              echo "Error summary:"
+              error_summary /tmp/gradle1.log
+            } > release_notes.md
+            exit 0
+          fi
+          unset SKIP_KARAOKE
 
           # attempt 2: without Vocal Splitter and Voice Cloner (the same build as before they were added)
           echo "First build failed, trying again without Vocal Splitter and Voice Cloner"
