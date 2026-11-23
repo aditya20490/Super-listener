@@ -225,6 +225,16 @@ class KaraokeModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(c
     engine?.targetVol = v.toFloat().coerceIn(0f, 1f)
   }
 
+  /** { alive, error }: is the silent player really running (and if not, why) */
+  @ReactMethod
+  fun playerStatus(promise: Promise) {
+    val m = Arguments.createMap()
+    val e = engine
+    m.putBoolean("alive", e != null && e.alive())
+    m.putString("error", e?.error ?: "")
+    promise.resolve(m)
+  }
+
   @ReactMethod
   fun playerPosition(promise: Promise) {
     promise.resolve((engine?.positionMs() ?: -1L).toDouble())
