@@ -62,7 +62,7 @@ let cur = null; // { key, song }  the song loaded in the player
 let active = false; // karaoke is what you hear
 let shadow = null; // { key }  the silent karaoke player runs for the current song
 let dirPath = '';
-let speed = 0.5; // seconds of work per second of song, learned from earlier jobs
+let speed = 2; // seconds of work per second of song (learned from earlier jobs; this is only the first guess)
 let lastFix = 0;
 let deadChecks = 0;
 let hooks = { isEight: () => false, getVolume: () => 1, refreshEight: async () => {} };
@@ -348,7 +348,12 @@ async function driftCheck(posSec) {
     deadChecks += 1;
     if (deadChecks >= 3 && active && !hooks.isEight()) {
       deadChecks = 0;
-      toast('Karaoke stopped. Playing the original again.');
+      let why = '';
+      try {
+        const st = await Native.playerStatus();
+        why = st && st.error ? ' (' + st.error + ')' : '';
+      } catch (e) {}
+      toast('Karaoke stopped' + why + '. Playing the original again.');
       deactivate();
     }
     return;
@@ -360,6 +365,43 @@ async function driftCheck(posSec) {
       Native.playerSeek(posSec * 1000 + 120);
     } catch (e) {}
   }
+}
+
+// waits until the silent player really runs; returns '' when it does, or the reason when it does not
+async function waitShadowAlive(ms) {
+  const t0 = Date.now();
+  let err = '';
+  while (Date.now() - t0 < ms) {
+    try {
+      const st = await Native.playerStatus();
+      if (st && st.alive) return '';
+      if (st && st.error) {
+        err = st.error;
+        break;
+      }
+    } catch (e) {
+      err = 'no answer';
+      break;
+    }
+    await sleep(100);
+  }
+  return err || 'it did not start in time';
+}
+
+// true when the silent player's position is really moving (so it is making sound)
+async function waitShadowMoving(ms) {
+  const t0 = Date.now();
+  let last = -1;
+  while (Date.now() - t0 < ms) {
+    let p = -1;
+    try {
+      p = await Native.playerPosition();
+    } catch (e) {}
+    if (last >= 0 && p > last) return true;
+    if (p >= 0) last = p;
+    await sleep(80);
+  }
+  return false;
 }
 
 async function rampMain(from, to) {
@@ -384,7 +426,19 @@ export async function activate() {
       toast('Could not start karaoke for this song.');
       return false;
     }
-    await sleep(300);
+  }
+  // never mute the original unless the karaoke player is really running
+  const why = await waitShadowAlive(1500);
+  if (why) {
+    toast('Karaoke could not start (' + why + '). Playing the original.');
+    stopShadow();
+    return false;
+  }
+  const playingNow = await mainPlaying();
+  if (playingNow && !(await waitShadowMoving(1500))) {
+    toast('Karaoke is not making sound yet. Playing the original.');
+    stopShadow();
+    return false;
   }
   // make sure both are on the same position before swapping (the original keeps playing while this happens)
   const mp = await mainPos();
@@ -397,7 +451,11 @@ export async function activate() {
       Native.playerSeek(mp * 1000 + 250);
     } catch (e) {}
     lastFix = Date.now();
-    await sleep(260);
+    if (playingNow && !(await waitShadowMoving(1000))) {
+      toast('Karaoke is not making sound yet. Playing the original.');
+      stopShadow();
+      return false;
+    }
   }
   if (!cur || cur.key !== key) return false;
   rec.usedAt = Date.now();
