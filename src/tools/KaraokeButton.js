@@ -1,8 +1,8 @@
-// The small K pill in the player, above the 8D pill (same size and style).
-//   K            tap: make the karaoke version of this song (in the background)
-//   3 min        being made, the time left counts down; tap for a reminder, long press to stop
-//   Ready        tap: switch to karaoke (seamless)
-//   K (filled)   karaoke is on, tap to go back to the original
+// The small K circle in the player, on the left of the heart (same size as the 8D circle).
+//   outline          no karaoke yet: tap to make it (in the background, you get a pop-up)
+//   faint fill       being made: tap for a reminder, long press to stop
+//   accent outline   ready: tap to switch to karaoke (seamless)
+//   filled           karaoke is on: tap to go back to the original
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Alert, ToastAndroid, Platform } from 'react-native';
 import * as Karaoke from './karaoke';
@@ -17,11 +17,7 @@ export default function KaraokeButton({ song, t }) {
   const [, setTick] = useState(0);
   useEffect(() => {
     const un = Karaoke.subscribe(() => setTick((n) => n + 1));
-    const id = setInterval(() => setTick((n) => n + 1), 1500); // keeps the countdown moving
-    return () => {
-      un();
-      clearInterval(id);
-    };
+    return () => un();
   }, []);
 
   const st = Karaoke.stateFor(song);
@@ -33,13 +29,13 @@ export default function KaraokeButton({ song, t }) {
 
   const onPress = async () => {
     if (working) {
-      say('Making karaoke. About ' + st.etaText + ' left. You can keep listening.');
+      say('Your karaoke is being made. You can keep listening.');
     } else if (st.phase === 'idle') {
       const r = await Karaoke.generate(song);
-      if (r === 'busy') say('Another karaoke is still being made' + (Karaoke.busyTitle() ? ': ' + Karaoke.busyTitle() : '') + '. Please wait until it is done.');
+      if (r === 'busy') say('Another karaoke is being made right now' + (Karaoke.busyTitle() ? ': ' + Karaoke.busyTitle() : '') + '. Please wait until it is done.');
       else if (r === 'error') say('Could not start karaoke for this song.');
       else if (r === 'unsupported') say('This build of the app does not include karaoke.');
-      else say('Making karaoke in the background. You can keep listening.');
+      else say('Your karaoke is being made. You can keep listening.');
     } else if (ready) {
       await Karaoke.activate();
     } else if (on) {
@@ -56,34 +52,25 @@ export default function KaraokeButton({ song, t }) {
   };
 
   return (
-    <View style={{ alignItems: 'flex-end', marginTop: 8, marginBottom: 2 }}>
-      <TouchableOpacity
-        onPress={onPress}
-        onLongPress={onLong}
-        activeOpacity={0.8}
-        style={{
-          minWidth: 74,
-          alignItems: 'center',
-          justifyContent: 'center',
-          overflow: 'hidden',
-          paddingHorizontal: 10,
-          paddingVertical: 4,
-          borderRadius: 15,
-          borderWidth: 1.5,
-          borderColor: accent ? t.accent : t.muted,
-          backgroundColor: on ? t.accent : 'transparent',
-        }}
-      >
-        {working ? (
-          <View
-            pointerEvents="none"
-            style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: Math.max(4, Math.round((st.progress || 0) * 100)) + '%', backgroundColor: t.accent, opacity: 0.22 }}
-          />
-        ) : null}
-        <Text style={{ fontSize: working || ready ? 12 : 15, lineHeight: 18, fontWeight: '900', color: on ? t.onAccent : accent ? t.accent : t.muted }}>
-          {working ? st.etaText : ready ? 'Ready' : 'K'}
-        </Text>
-      </TouchableOpacity>
-    </View>
+    <TouchableOpacity
+      onPress={onPress}
+      onLongPress={onLong}
+      activeOpacity={0.8}
+      style={{
+        marginRight: 4,
+        width: 30,
+        height: 30,
+        borderRadius: 15,
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        borderWidth: 1.5,
+        borderColor: accent ? t.accent : t.muted,
+        backgroundColor: on ? t.accent : 'transparent',
+      }}
+    >
+      {working ? <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: t.accent, opacity: 0.2 }} /> : null}
+      <Text style={{ fontSize: 14, lineHeight: 18, fontWeight: '900', color: on ? t.onAccent : accent ? t.accent : t.muted }}>K</Text>
+    </TouchableOpacity>
   );
 }
