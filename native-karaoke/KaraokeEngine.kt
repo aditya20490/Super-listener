@@ -34,6 +34,7 @@ class KaraokeEngine(
   @Volatile private var baseMs = 0L
   @Volatile private var rate = 44100
   @Volatile private var track: AudioTrack? = null
+  @Volatile var error: String = ""
   private var thread: Thread? = null
   private var curVol: Float = startVolume
 
@@ -47,6 +48,9 @@ class KaraokeEngine(
   fun release() {
     stopped = true
   }
+
+  /** true while the player really exists and runs (its audio output was created) */
+  fun alive(): Boolean = track != null && error.isEmpty() && !stopped
 
   /** Position on the original song's timeline, in ms (or -1 if not playing yet). */
   fun positionMs(): Long {
@@ -64,7 +68,8 @@ class KaraokeEngine(
 
   private fun makeTrack(sr: Int): AudioTrack {
     val minSize = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-    val size = max(minSize * 2, sr * 4 / 8)
+    // the buffer size must be a whole number of frames (4 bytes each for 16-bit stereo)
+    val size = (max(minSize * 2, sr * 4 / 4) / 4) * 4
     return AudioTrack.Builder()
       .setAudioAttributes(
         AudioAttributes.Builder()
@@ -226,7 +231,8 @@ class KaraokeEngine(
         }
       }
     } catch (t: Throwable) {
-      // the normal player is still playing, so a failure here just means no karaoke sound
+      // the normal player is still playing, so a failure here just means no karaoke sound. The reason is kept for the app to show.
+      error = (t.javaClass.simpleName + ": " + (t.message ?: "")).take(120)
     } finally {
       try { track?.stop() } catch (e: Throwable) {}
       try { track?.release() } catch (e: Throwable) {}
