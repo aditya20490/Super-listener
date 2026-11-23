@@ -266,6 +266,8 @@ export function stateFor(song) {
   if (!supported || !song || song.mka) return { phase: 'hidden' };
   const key = keyOf(song);
   if (!key) return { phase: 'hidden' };
+  // a song whose karaoke is already made can always be used, even while another karaoke is being made
+  if (recs[key]) return { phase: active && cur && cur.key === key ? 'active' : 'ready' };
   if (job) {
     if (job.key === key) {
       let remain;
@@ -275,7 +277,6 @@ export function stateFor(song) {
     }
     return { phase: 'idle', busy: true, busyTitle: job.title };
   }
-  if (recs[key]) return { phase: active && cur && cur.key === key ? 'active' : 'ready' };
   return { phase: 'idle' };
 }
 
