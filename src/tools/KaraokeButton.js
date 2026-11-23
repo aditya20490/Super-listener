@@ -1,8 +1,8 @@
 // The small K circle in the player, on the left of the heart (same size as the 8D circle).
 //   outline          no karaoke yet: tap to make it (in the background, you get a pop-up)
 //   faint fill       being made: tap for a reminder, long press to stop
-//   accent outline   ready: tap to switch to karaoke (seamless)
-//   filled           karaoke is on: tap to go back to the original
+//   accent outline + dot   ready: tap to switch to karaoke (seamless)
+//   solid fill       karaoke is on (like 8D when it is on): tap to go back to the original
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Alert, ToastAndroid, Platform } from 'react-native';
 import * as Karaoke from './karaoke';
@@ -57,19 +57,19 @@ export default function KaraokeButton({ song, t }) {
       onLongPress={onLong}
       activeOpacity={0.8}
       style={{
-        marginRight: 4,
+        marginRight: -1, // sits exactly above the 8D options circle
         width: 30,
         height: 30,
         borderRadius: 15,
         alignItems: 'center',
         justifyContent: 'center',
-        overflow: 'hidden',
         borderWidth: 1.5,
         borderColor: accent ? t.accent : t.muted,
         backgroundColor: on ? t.accent : 'transparent',
       }}
     >
-      {working ? <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: t.accent, opacity: 0.2 }} /> : null}
+      {working ? <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, borderRadius: 15, backgroundColor: t.accent, opacity: 0.2 }} /> : null}
+      {ready ? <View pointerEvents="none" style={{ position: 'absolute', top: -1, right: -1, width: 9, height: 9, borderRadius: 5, backgroundColor: t.accent }} /> : null}
       <Text style={{ fontSize: 14, lineHeight: 18, fontWeight: '900', color: on ? t.onAccent : accent ? t.accent : t.muted }}>K</Text>
     </TouchableOpacity>
   );
