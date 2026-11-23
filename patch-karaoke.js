@@ -1,5 +1,6 @@
 // Runs during the build (after patch-stats.js), before the app is created. It edits only the build's own copy of the music
-// app (old-music/): the K button next to 8D, and a few small hooks in audioEngine.js so karaoke can follow the player.
+// app (old-music/): the K circle on the left of the heart, the 8D pill turned into a circle, and a few small hooks in
+// audioEngine.js so karaoke can follow the player. Nothing else in the player screen is moved.
 // ALL-OR-NOTHING: if any spot cannot be found (the music app changed), nothing is edited and the build goes on without the
 // K button. It never stops the build. Your my-music-app repo is not changed.
 const fs = require('fs');
@@ -28,13 +29,10 @@ function run(text, file, steps) {
 
 const NP_STEPS = [
   ['import KaraokeButton', "import * as Engine from './audioEngine';", "\nimport KaraokeButton from './tools/KaraokeButton';", 'after'],
-  [
-    '<KaraokeButton',
-    "<View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>\n                  {eightD ? (",
-    '<KaraokeButton song={song} t={t} />\n                ',
-    'before',
-  ],
-  ['minWidth: 74,', 'borderColor: eightD ? t.accent : t.muted,', "\n                      minWidth: 74,\n                      justifyContent: 'center',", 'after'],
+  // the K circle goes on the left of the heart, in the same row (nothing else moves)
+  ['<KaraokeButton', "                <TouchableOpacity\n                  onPress={onToggleFav}\n                  style={{ width: 44, height: 40, alignItems: 'center', justifyContent: 'center' }}\n                >\n                  <Ionicons name={isFav ? 'heart' : 'heart-outline'} size={28} color={isFav ? t.accent : t.text} />\n                </TouchableOpacity>\n", "                {/* K circle (karaoke) on the left of the heart */}\n                <View style={{ flexDirection: 'row', alignItems: 'center' }}>\n                  <KaraokeButton song={song} t={t} />\n                  <TouchableOpacity\n                    onPress={onToggleFav}\n                    style={{ width: 44, height: 40, alignItems: 'center', justifyContent: 'center' }}\n                  >\n                    <Ionicons name={isFav ? 'heart' : 'heart-outline'} size={28} color={isFav ? t.accent : t.text} />\n                  </TouchableOpacity>\n                </View>\n", 'replace'],
+  // the 8D pill becomes a circle with just "8D" (same size as the 8D options circle next to it)
+  ['{/* 8D circle */}', "                  <TouchableOpacity\n                    onPress={onToggleEightD}\n                    activeOpacity={0.8}\n                    style={{\n                      flexDirection: 'row',\n                      alignItems: 'center',\n                      paddingHorizontal: 10,\n                      paddingVertical: 4,\n                      borderRadius: 15,\n                      borderWidth: 1.5,\n                      borderColor: eightD ? t.accent : t.muted,\n                      backgroundColor: eightD ? t.accent : 'transparent',\n                    }}\n                  >\n                    <Ionicons name=\"headset\" size={14} color={eightD ? t.onAccent : t.muted} />\n                    <Text style={{ marginLeft: 4, fontSize: 12, fontWeight: '800', color: eightD ? t.onAccent : t.muted }}>8D</Text>\n                  </TouchableOpacity>\n", "                  <TouchableOpacity\n                    onPress={onToggleEightD}\n                    activeOpacity={0.8}\n                    style={{\n                      width: 30,\n                      height: 30,\n                      borderRadius: 15,\n                      alignItems: 'center',\n                      justifyContent: 'center',\n                      borderWidth: 1.5,\n                      borderColor: eightD ? t.accent : t.muted,\n                      backgroundColor: eightD ? t.accent : 'transparent',\n                    }}\n                  >\n                    {/* 8D circle */}\n                    <Text style={{ fontSize: 11, fontWeight: '900', color: eightD ? t.onAccent : t.muted }}>8D</Text>\n                  </TouchableOpacity>\n", 'replace'],
 ];
 
 const AE_STEPS = [
