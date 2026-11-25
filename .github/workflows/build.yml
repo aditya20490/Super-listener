@@ -101,6 +101,7 @@ jobs:
           node patch-studio.js
           node patch-stats.js
           node patch-karaoke.js || echo "WARNING: the Karaoke button could not be added, building without it"
+          node patch-home-finder.js || echo "WARNING: the Home Screen online results could not be added, building without them"   # <-- NEW LINE
 
       - name: Create the app project
         run: |
@@ -175,7 +176,7 @@ jobs:
             node ../link-finder.js || exit 1
 
             # Text to Speech: the offline Kokoro voices. If this fails, the app is still built, just without voices.
-            node ../link-tts.js || echo "WARNING: the voice engine could not be added, building without it"
+            node ../link-tts.js || echo "WARNING: the voice engine could not be added, building without voices"
             # Vocal Splitter + Voice Cloner inside the hamburger menu. If this fails, this build attempt stops and the next one is made without them.
             node ../link-studio.js || exit 1
             # Karaoke (the K button): uses the Vocal Splitter's engine. If it is not linked, or the build fails with it, it is dropped on its own.
