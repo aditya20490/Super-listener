@@ -2,7 +2,8 @@
 // When nothing on the phone matches what you typed, this takes the place of "Nothing matches your search.":
 // it looks the song up online (the same search as Music Finder > Songs), shows the same result rows
 // (cover, title, artist - album, Preview, Copy link), and adds a Download button on each row that runs the same
-// download as Music Finder. Nothing on your phone is searched or changed here; this only shows when there is no local match.
+// download as Music Finder. Nothing on your phone is searched or changed here.
+// It shows by itself when there is no local match, and HomeFinderMore (bottom of the list) shows it on tap when there is one.
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Image, TouchableOpacity, ActivityIndicator } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
@@ -26,7 +27,7 @@ function remember(q, list) {
   if (cache.size > 12) cache.delete(cache.keys().next().value);
 }
 
-export default function HomeFinder({ query }) {
+export default function HomeFinder({ query, alsoOnline }) {
   const { t } = useTheme();
   const q = String(query || '').trim();
 
@@ -192,9 +193,9 @@ export default function HomeFinder({ query }) {
         </View>
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={{ color: t.text, fontSize: 15, fontWeight: '800' }} numberOfLines={2}>
-            {'Not on your phone: "' + q + '"'}
+            {(alsoOnline ? 'Online results for "' : 'Not on your phone: "') + q + '"'}
           </Text>
-          <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }}>Online results from Apple Music. Tap the download button on a song to get it.</Text>
+          <Text style={{ color: t.muted, fontSize: 12, marginTop: 2 }}>{(alsoOnline ? 'From Apple Music. ' : 'Online results from Apple Music. ') + 'Tap the download button on a song to get it.'}</Text>
         </View>
       </View>
 
@@ -258,5 +259,47 @@ export default function HomeFinder({ query }) {
         </View>
       ) : null}
     </View>
+  );
+}
+
+// The little button at the very bottom of the Home Screen lists while you search and songs on the phone DO match.
+// Tap it and the online results are added below. Typing something else puts it back to just the button.
+let openedFor = '';
+export function HomeFinderMore({ query }) {
+  const { t } = useTheme();
+  const q = String(query || '').trim();
+  const key = q.toLowerCase();
+  const [open, setOpen] = useState(() => openedFor !== '' && openedFor === key);
+  useEffect(() => {
+    setOpen(openedFor !== '' && openedFor === key);
+  }, [key]);
+
+  if (!q) return null;
+  if (open) return <HomeFinder query={q} alsoOnline />;
+  return (
+    <TouchableOpacity
+      onPress={() => {
+        openedFor = key;
+        setOpen(true);
+      }}
+      activeOpacity={0.8}
+      accessibilityLabel="Search online"
+      style={{
+        alignSelf: 'center',
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginTop: 18,
+        marginBottom: 8,
+        paddingHorizontal: 20,
+        paddingVertical: 11,
+        borderRadius: 22,
+        backgroundColor: t.card,
+        borderWidth: 1,
+        borderColor: t.track,
+      }}
+    >
+      <Ionicons name="globe-outline" size={17} color={t.text} />
+      <Text style={{ color: t.text, fontWeight: '700', fontSize: 14, marginLeft: 8 }}>Search online</Text>
+    </TouchableOpacity>
   );
 }
