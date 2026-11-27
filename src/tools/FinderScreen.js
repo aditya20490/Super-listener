@@ -5,8 +5,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
-  Animated,
-  StatusBar,
   Modal,
   TouchableOpacity,
   TextInput,
@@ -24,11 +22,10 @@ import * as Clipboard from 'expo-clipboard';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets, SafeAreaProvider } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Engine from '../audioEngine';
 import { Screen, useAppTheme } from './Tools';
 import { TASK, COUNTRY_LIST } from './finderData';
-import { C, ACC, TAB_META, haptic, Press, Field, Action, Sheet, Pop, TabEnter, Ring, LivePill, Header, Eyebrow, Card, Label, Squircle } from './finderUi';
 
 let WebBrowser = null;
 try {
@@ -201,35 +198,7 @@ function CoverImage({ uri, t }) {
       () => {}
     );
   }, [uri]);
-  return <Image source={{ uri: uri }} style={{ width: '100%', aspectRatio: ratio, borderRadius: 12, backgroundColor: C.pill }} resizeMode="cover" />;
-}
-
-const NAV_ICON = { songs: 'musical-notes', covers: 'image', lyrics: 'document-text', automate: 'flash' };
-const roundBtn = { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: C.hair, alignItems: 'center', justifyContent: 'center' };
-const smallBtn = { flex: 1, height: 28, borderRadius: 9, alignItems: 'center', justifyContent: 'center' };
-const smallTxt = { color: C.text, fontSize: 11.5, fontWeight: '700' };
-
-// gives the page below the safe area sizes of the phone (the window is its own screen, so it needs its own)
-function Shell({ children }) {
-  const ins = useSafeAreaInsets();
-  return children(ins);
-}
-
-// one bottom tab: the icon springs up a little when its page is open
-function TabItem({ item, active, onPress }) {
-  const s = useRef(new Animated.Value(active ? 1 : 0)).current;
-  useEffect(() => {
-    Animated.spring(s, { toValue: active ? 1 : 0, useNativeDriver: true, friction: 6, tension: 120 }).start();
-  }, [active]);
-  const color = active ? ACC[item.key].c : C.muted;
-  return (
-    <Press onPress={onPress} scale={0.92} style={{ flex: 1, alignItems: 'center', paddingVertical: 3 }}>
-      <Animated.View style={{ transform: [{ scale: s.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] }) }] }}>
-        <Ionicons name={NAV_ICON[item.key]} size={22} color={color} />
-      </Animated.View>
-      <Text style={{ fontSize: 10.5, fontWeight: '600', marginTop: 3, color }}>{item.label}</Text>
-    </Press>
-  );
+  return <Image source={{ uri: uri }} style={{ width: '100%', aspectRatio: ratio, borderRadius: 12, backgroundColor: t.track }} resizeMode="cover" />;
 }
 
 export default function FinderScreen() {
@@ -270,7 +239,6 @@ export default function FinderScreen() {
   const [pickerQ, setPickerQ] = useState('');
 
   const lastClip = useRef('');
-  const pickerKeep = useRef(null);
 
   // ---------- previews: a hidden page plays the 30 second clip, so your music player is not touched ----------
   const stopPreview = () => {
@@ -470,115 +438,104 @@ export default function FinderScreen() {
     setOpen(false);
   };
 
-  // ---------- the little live-activity pill (it only watches what is already happening) ----------
-  const [pill, setPill] = useState(null);
-  const pillTimer = useRef(null);
-  const wasBusy = useRef(false);
-  const flashPill = (p, ms) => {
-    if (pillTimer.current) clearTimeout(pillTimer.current);
-    setPill(p);
-    if (ms) pillTimer.current = setTimeout(() => setPill(null), ms);
+  // ---------- look: the Music Finder look in the player's colours ----------
+  const line = t.track;
+  const panel = { backgroundColor: t.card, borderWidth: 1, borderColor: line, borderRadius: 16, padding: 14, marginBottom: 18 };
+  const labelStyle = { color: t.muted, fontSize: 13, fontWeight: '600', marginBottom: 6, marginLeft: 2 };
+  const field = {
+    backgroundColor: line,
+    color: t.text,
+    borderWidth: 1,
+    borderColor: line,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    fontSize: 16,
+    marginBottom: 12,
   };
-  useEffect(() => {
-    if (busy) {
-      wasBusy.current = true;
-      flashPill({ title: 'Downloading', sub: 'Task Automator is working', color: ACC.songs.c, working: true }, 0);
-    } else if (wasBusy.current) {
-      wasBusy.current = false;
-      const bad = log.length > 0 && log[0].k === 'bad';
-      if (bad) haptic.warn();
-      else haptic.success();
-      flashPill(
-        bad
-          ? { title: 'Could not start', sub: 'Check the link and try again', color: C.red, icon: 'alert' }
-          : { title: 'Download started', sub: 'Saving to your Music folder', color: C.green, icon: 'checkmark' },
-        2200
-      );
-    }
-  }, [busy]);
-  useEffect(() => {
-    if (copied) flashPill({ title: 'Link copied', sub: 'Ready to paste', color: C.green, icon: 'copy' }, 1600);
-  }, [copied]);
-  useEffect(() => {
-    if (playingId) flashPill({ title: 'Previewing', sub: '30 second clip', color: ACC.songs.c, icon: 'play' }, 1800);
-  }, [playingId]);
-  useEffect(
-    () => () => {
-      if (pillTimer.current) clearTimeout(pillTimer.current);
-    },
-    []
+  const goBtn = (disabled) => ({
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 15,
+    borderRadius: 12,
+    backgroundColor: t.accent,
+    opacity: disabled ? 0.55 : 1,
+  });
+  const goText = { color: t.onAccent, fontSize: 17, fontWeight: '700' };
+  const ghostBtn = {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: line,
+    backgroundColor: line,
+  };
+
+  const Heading = ({ eyebrow, title, lead }) => (
+    <View>
+      <Text style={{ color: t.accent, fontWeight: '700', fontSize: 13, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>{eyebrow}</Text>
+      <Text style={{ color: t.text, fontSize: 30, fontWeight: '800', marginBottom: 8 }}>{title}</Text>
+      <Text style={{ color: t.muted, fontSize: 16, lineHeight: 24, marginBottom: 20 }}>{lead}</Text>
+    </View>
   );
 
-  // ---------- look: the mockup (pure black, grouped cards) ----------
-  const [info, setInfo] = useState(false);
-  const scrollY = useRef(new Animated.Value(0)).current;
-  const pulseA = useRef(new Animated.Value(0)).current;
-  const pulseB = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    if (!open) return undefined;
-    pulseA.setValue(0);
-    pulseB.setValue(0);
-    const run = (v, delay) =>
-      Animated.sequence([
-        Animated.delay(delay),
-        Animated.timing(v, { toValue: 1, duration: 1100, useNativeDriver: true }),
-        Animated.timing(v, { toValue: 0, duration: 0, useNativeDriver: true }),
-        Animated.timing(v, { toValue: 1, duration: 1100, useNativeDriver: true }),
-      ]);
-    const a = Animated.parallel([run(pulseA, 600), run(pulseB, 1300)]);
-    a.start();
-    return () => a.stop();
-  }, [open]);
+  const pickerBox = (labelText, valueText, onPress) => (
+    <View>
+      <Text style={labelStyle}>{labelText}</Text>
+      <TouchableOpacity onPress={onPress} activeOpacity={0.8} style={[field, { flexDirection: 'row', alignItems: 'center' }]}>
+        <Text style={{ color: t.text, fontSize: 16, flex: 1 }} numberOfLines={1}>
+          {valueText}
+        </Text>
+        <Ionicons name="chevron-down" size={18} color={t.muted} />
+      </TouchableOpacity>
+    </View>
+  );
 
-  const acc = ACC[tab] || ACC.songs;
-  const meta = TAB_META[tab] || TAB_META.songs;
-  const ring = (v) => ({
-    position: 'absolute',
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 2,
-    borderColor: acc.c,
-    opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] }),
-    transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [1, 1.8] }) }],
-  });
-
-  const rowStyle = { flexDirection: 'row', alignItems: 'center', minHeight: 54, paddingHorizontal: 16, paddingVertical: 10 };
-  const group = { backgroundColor: C.card, borderWidth: 1, borderColor: C.hair, borderRadius: 18, overflow: 'hidden', marginBottom: 16 };
-  const Sep = ({ left }) => <View style={{ height: 1, marginLeft: left, backgroundColor: C.hair2 }} />;
-
-  const pickRow = (labelText, valueText, onPress) => (
-    <Press onPress={onPress} scale={0.988} tint="rgba(255,255,255,0.06)" style={rowStyle}>
-      <Text style={{ color: C.text, fontSize: 15, flex: 1 }}>{labelText}</Text>
-      <Text style={{ color: C.muted, fontSize: 15, maxWidth: '62%' }} numberOfLines={1}>
-        {valueText}
-      </Text>
-      <Ionicons name="chevron-forward" size={16} color={C.ph} style={{ marginLeft: 6 }} />
-    </Press>
+  const linkButton = (key, labelText, sub, url, hi) => (
+    <TouchableOpacity
+      key={key}
+      activeOpacity={0.85}
+      onPress={() => openInApp(url)}
+      style={{
+        padding: 13,
+        borderRadius: 12,
+        marginTop: 8,
+        borderWidth: 1,
+        borderColor: hi ? t.accent : line,
+        backgroundColor: hi ? t.accent : line,
+      }}
+    >
+      <Text style={{ fontSize: 16, fontWeight: '600', color: hi ? t.onAccent : t.text }}>{labelText}</Text>
+      <Text style={{ fontSize: 13, marginTop: 2, color: hi ? t.onAccent : t.muted, opacity: hi ? 0.85 : 1 }}>{sub}</Text>
+    </TouchableOpacity>
   );
 
   // ---------- the pages ----------
   const songsPage = (
     <View>
-      <Header acc={ACC.songs} eyebrow="Apple Music" title="Download" />
-      <Card>
-        <Label>Apple Music song link</Label>
-        <Field
-          acc={ACC.songs}
+      <Heading
+        eyebrow="Apple Music"
+        title="Download"
+        lead="Paste a song link, tap Download. It is grabbed in the background and saved to your Music folder."
+      />
+      <View style={panel}>
+        <Text style={labelStyle}>Apple Music song link</Text>
+        <TextInput
           value={link}
           onChangeText={setLink}
           placeholder="https://music.apple.com/us/song/..."
+          placeholderTextColor={t.muted}
           autoCapitalize="none"
           autoCorrect={false}
           spellCheck={false}
-          onClear={() => {
-            setLink('');
-            setLog([]);
-          }}
+          style={field}
         />
-        <View style={{ flexDirection: 'row', marginTop: 4 }}>
-          <Press
-            style={{ height: 44, paddingHorizontal: 14, borderRadius: 14, backgroundColor: C.pill, flexDirection: 'row', alignItems: 'center', marginRight: 8 }}
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+          <TouchableOpacity
+            style={ghostBtn}
+            activeOpacity={0.8}
             onPress={async () => {
               try {
                 setLink(await Clipboard.getStringAsync());
@@ -587,217 +544,179 @@ export default function FinderScreen() {
               }
             }}
           >
-            <Ionicons name="clipboard-outline" size={16} color={C.text} />
-            <Text style={{ color: C.text, fontSize: 14.5, fontWeight: '600', marginLeft: 6 }}>Paste</Text>
-          </Press>
-          <Press
-            style={{ height: 44, paddingHorizontal: 16, borderRadius: 14, backgroundColor: C.pill, alignItems: 'center', justifyContent: 'center', marginRight: 8 }}
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }}>Paste</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={ghostBtn}
+            activeOpacity={0.8}
             onPress={() => {
               setLink('');
               setLog([]);
             }}
           >
-            <Text style={{ color: C.text, fontSize: 14.5, fontWeight: '600' }}>Clear</Text>
-          </Press>
-          <Action label="Download" icon="arrow-down" color={ACC.songs.c} height={44} working={busy} disabled={busy} onPress={startDownload} style={{ flex: 1 }} />
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }}>Clear</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[goBtn(busy), { flex: 2 }]} activeOpacity={0.85} disabled={busy} onPress={startDownload}>
+            <Text style={goText}>Download</Text>
+          </TouchableOpacity>
         </View>
-        {log.length > 0 ? (
-          <View style={{ marginTop: 12 }}>
-            {log.map((x, i) => (
-              <Text key={i} style={{ fontSize: 13, lineHeight: 20, color: x.k === 'bad' ? C.red : x.k === 'good' ? C.green : C.muted }}>
-                {x.m}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-      </Card>
+        <View style={{ marginTop: 12 }}>
+          {log.map((x, i) => (
+            <Text key={i} style={{ fontSize: 13, lineHeight: 21, color: x.k === 'bad' ? '#ff453a' : x.k === 'good' ? '#34c759' : t.muted }}>
+              {x.m}
+            </Text>
+          ))}
+        </View>
+      </View>
 
-      <Card>
-        <Label>Song or artist</Label>
-        <Field
-          acc={ACC.songs}
-          icon="search"
+      <View style={panel}>
+        <Text style={labelStyle}>Song or artist</Text>
+        <TextInput
           value={songQ}
           onChangeText={setSongQ}
           placeholder="e.g. Tiffany"
+          placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchSongs()}
           autoCorrect={false}
+          style={field}
         />
-        <Action label="Search" color="#FFFFFF" ink="#000000" onPress={() => searchSongs()} glow={false} style={{ marginTop: 2 }} />
-      </Card>
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchSongs()}>
+          <Text style={goText}>Search</Text>
+        </TouchableOpacity>
+      </View>
 
       {songs === null && songMsg ? (
         <View style={{ alignItems: 'center', padding: 24 }}>
-          <ActivityIndicator color={ACC.songs.c} />
-          <Text style={{ color: C.muted, marginTop: 10 }}>{songMsg}</Text>
+          <ActivityIndicator color={t.accent} />
+          <Text style={{ color: t.muted, marginTop: 10 }}>{songMsg}</Text>
         </View>
       ) : null}
-      {songs && songs.length === 0 && songMsg ? <Text style={{ color: C.muted, textAlign: 'center', padding: 28 }}>{songMsg}</Text> : null}
-      {songs && songs.length > 0 ? (
-        <View>
-          <Eyebrow left="Top Results" right={songs.length + (songs.length === 1 ? ' song' : ' songs')} />
-          <View style={group}>
-            {songs.map((s, i) => (
-              <Pop key={s.id} index={i}>
-                {i > 0 ? <Sep left={76} /> : null}
-                <Press onPress={() => openInApp(s.apple)} scale={0.988} tint="rgba(255,255,255,0.06)" haptics={false} style={[rowStyle, { paddingHorizontal: 12 }]}>
-                  <Image source={{ uri: s.art }} style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: C.pill }} />
-                  <View style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
-                    <Text style={{ color: C.text, fontSize: 14.5, fontWeight: '600' }} numberOfLines={1}>
-                      {s.title}
-                    </Text>
-                    <Text style={{ color: C.muted, fontSize: 12, marginTop: 2 }} numberOfLines={1}>
-                      {s.artist + ' · ' + s.album}
-                    </Text>
-                  </View>
-                  {s.preview ? (
-                    <Press
-                      onPress={() => togglePreview(s)}
-                      scale={0.88}
-                      hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: 18,
-                        marginLeft: 8,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        backgroundColor: playingId === s.id ? 'rgba(250,45,72,0.18)' : C.pill,
-                      }}
-                    >
-                      {playingId === s.id ? (
-                        <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
-                          <View style={{ position: 'absolute' }}>
-                            <Ring size={30} color={ACC.songs.c} width={2.6} />
-                          </View>
-                          <Ionicons name="stop" size={13} color={ACC.songs.c} />
-                        </View>
-                      ) : (
-                        <Ionicons name="play" size={15} color={C.text} style={{ marginLeft: 2 }} />
-                      )}
-                    </Press>
-                  ) : null}
-                  {s.apple ? (
-                    <Press
-                      onPress={() => copySongLink(s.apple)}
-                      scale={0.88}
-                      hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: 18,
-                        marginLeft: 8,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        backgroundColor: copied === s.apple ? 'rgba(48,209,88,0.16)' : C.pill,
-                      }}
-                    >
-                      <Ionicons name={copied === s.apple ? 'checkmark' : 'copy-outline'} size={17} color={copied === s.apple ? C.green : C.text} />
-                    </Press>
-                  ) : null}
-                </Press>
-              </Pop>
-            ))}
-          </View>
-        </View>
-      ) : null}
+      {songs && songs.length === 0 && songMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 28 }}>{songMsg}</Text> : null}
+      {songs
+        ? songs.map((s) => (
+            <TouchableOpacity
+              key={s.id}
+              activeOpacity={0.85}
+              onPress={() => openInApp(s.apple)}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 12,
+                backgroundColor: t.card,
+                borderWidth: 1,
+                borderColor: line,
+                borderRadius: 14,
+                padding: 10,
+                marginBottom: 10,
+              }}
+            >
+              <Image source={{ uri: s.art }} style={{ width: 60, height: 60, borderRadius: 8, backgroundColor: line }} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={{ color: t.text, fontWeight: '700' }} numberOfLines={1}>
+                  {s.title}
+                </Text>
+                <Text style={{ color: t.muted, fontSize: 14, marginTop: 2 }} numberOfLines={1}>
+                  {s.artist + ' • ' + s.album}
+                </Text>
+              </View>
+              {s.preview ? (
+                <TouchableOpacity
+                  onPress={() => togglePreview(s)}
+                  activeOpacity={0.8}
+                  style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: line }}
+                >
+                  <Text style={{ color: t.text, fontWeight: '600', fontSize: 14 }}>{playingId === s.id ? 'Stop' : 'Preview'}</Text>
+                </TouchableOpacity>
+              ) : null}
+              {s.apple ? (
+                <TouchableOpacity
+                  onPress={() => copySongLink(s.apple)}
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                  style={{ width: 40, height: 40, borderRadius: 10, backgroundColor: line, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Ionicons name={copied === s.apple ? 'checkmark' : 'copy-outline'} size={19} color={copied === s.apple ? t.accent : t.text} />
+                </TouchableOpacity>
+              ) : null}
+            </TouchableOpacity>
+          ))
+        : null}
     </View>
   );
 
   const coversPage = (
     <View>
-      <Header acc={ACC.covers} eyebrow="iTunes Artwork Finder" title="Album Cover" />
-      <View style={group}>
-        {pickRow('Media', (ENTITIES.find((e) => e.code === entity) || {}).name || entity, () => {
+      <Heading
+        eyebrow="iTunes Artwork Finder"
+        title="Album Cover"
+        lead="Same method as the real artwork finder: standard and uncompressed covers."
+      />
+      <View style={panel}>
+        {pickerBox('Media', (ENTITIES.find((e) => e.code === entity) || {}).name || entity, () => {
           setPickerQ('');
           setPicker({ title: 'Media', items: ENTITIES, value: entity, onPick: setEntity, search: false });
         })}
-        <Sep left={16} />
-        {pickRow('Region', (COUNTRIES.find((c) => c.code === region) || {}).name || region.toUpperCase(), () => {
+        {pickerBox('Region', (COUNTRIES.find((c) => c.code === region) || {}).name || region.toUpperCase(), () => {
           setPickerQ('');
           setPicker({ title: 'Region', items: COUNTRIES, value: region, onPick: setRegion, search: true });
         })}
-      </View>
-      <Card>
-        <Label>Search</Label>
-        <Field
-          acc={ACC.covers}
-          icon="search"
+        <Text style={labelStyle}>Search</Text>
+        <TextInput
           value={coverQ}
           onChangeText={setCoverQ}
           placeholder="e.g. Montero"
+          placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchCovers()}
           autoCorrect={false}
+          style={field}
         />
-        <Action label="Get the artwork" color={ACC.covers.c} onPress={() => searchCovers()} style={{ marginTop: 2 }} />
-      </Card>
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchCovers()}>
+          <Text style={goText}>Get the artwork</Text>
+        </TouchableOpacity>
+      </View>
 
       {covers === null && coverMsg ? (
         <View style={{ alignItems: 'center', padding: 24 }}>
-          <ActivityIndicator color={ACC.covers.c} />
-          <Text style={{ color: C.muted, marginTop: 10 }}>{coverMsg}</Text>
+          <ActivityIndicator color={t.accent} />
+          <Text style={{ color: t.muted, marginTop: 10 }}>{coverMsg}</Text>
         </View>
       ) : null}
-      {covers && covers.length === 0 && coverMsg ? <Text style={{ color: C.muted, textAlign: 'center', padding: 28 }}>{coverMsg}</Text> : null}
+      {covers && covers.length === 0 && coverMsg ? <Text style={{ color: t.muted, textAlign: 'center', padding: 28 }}>{coverMsg}</Text> : null}
       {covers && covers.length > 0 ? (
         <View>
-          <Eyebrow left="Artwork Results" right={covers.length + (covers.length === 1 ? ' result' : ' results')} />
-          <Text style={{ color: C.muted, fontSize: 12.5, lineHeight: 18, marginHorizontal: 4, marginBottom: 12 }}>
+          <Text style={{ color: t.muted, fontSize: 13, lineHeight: 20, marginHorizontal: 2, marginTop: 4, marginBottom: 18 }}>
             Tap a button to open the image, then press and hold it to download. If the item is not on iTunes, this tool will not find it.
           </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
-            {covers.map((d, i) => (
-              <Pop key={i} index={i} style={{ width: '48.5%', marginBottom: 12 }}>
-                <View style={{ backgroundColor: C.card, borderWidth: 1, borderColor: C.hair, borderRadius: 18, padding: 10 }}>
-                  <View>
-                    <CoverImage uri={d.url} t={t} />
-                    <View style={{ position: 'absolute', left: 6, bottom: 6, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                      <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>{isAppEntity ? '1024²' : d.uncompressed ? '3000²' : '600²'}</Text>
-                    </View>
-                  </View>
-                  <Text style={{ color: C.text, fontSize: 13, fontWeight: '700', marginTop: 9, lineHeight: 17 }} numberOfLines={2}>
-                    {d.title}
-                  </Text>
-                  <Text style={{ color: C.muted, fontSize: 11, marginTop: 2, marginBottom: 9 }}>{isAppEntity ? 'App icon' : d.uncompressed ? 'Standard + uncompressed' : 'Cover art'}</Text>
-                  {isAppEntity ? (
-                    <View style={{ flexDirection: 'row' }}>
-                      <Press onPress={() => openInApp(d.url)} style={[smallBtn, { backgroundColor: C.pill, marginRight: 6 }]}>
-                        <Text style={smallTxt}>Icon</Text>
-                      </Press>
-                      {d.appstore ? (
-                        <Press onPress={() => openInApp(d.appstore)} style={[smallBtn, { backgroundColor: 'rgba(10,132,255,0.2)', borderWidth: 1, borderColor: 'rgba(10,132,255,0.55)' }]}>
-                          <Text style={[smallTxt, { color: '#4DA3FF' }]}>Store</Text>
-                        </Press>
-                      ) : null}
+          {covers.map((d, i) => (
+            <View key={i} style={{ backgroundColor: t.card, borderWidth: 1, borderColor: line, borderRadius: 18, padding: 12, marginBottom: 16 }}>
+              <CoverImage uri={d.url} t={t} />
+              <Text style={{ color: t.text, fontSize: 18, fontWeight: '700', marginTop: 12, marginHorizontal: 4, marginBottom: 10, lineHeight: 24 }}>
+                {d.title}
+              </Text>
+              {isAppEntity ? (
+                <View>
+                  {linkButton('icon', 'App icon', '1024 × 1024', d.url, true)}
+                  {d.appstore ? linkButton('store', 'View on the App Store', 'Opens the store page', d.appstore, false) : null}
+                </View>
+              ) : (
+                <View>
+                  {linkButton('std', 'Standard Resolution', '600 × 600', d.url, false)}
+                  {d.uncompressed ? (
+                    <View>
+                      {linkButton('unc', 'Uncompressed High Resolution', 'Full quality, 3000 × 3000 (large file)', d.uncompressed, true)}
+                      <TouchableOpacity onPress={() => copyLink(d.uncompressed)} activeOpacity={0.7} style={{ padding: 10, alignItems: 'center', marginTop: 4 }}>
+                        <Text style={{ color: t.muted, fontSize: 14 }}>{copied === d.uncompressed ? 'Copied' : 'Copy uncompressed link'}</Text>
+                      </TouchableOpacity>
                     </View>
                   ) : (
-                    <View>
-                      <View style={{ flexDirection: 'row' }}>
-                        <Press onPress={() => openInApp(d.url)} style={[smallBtn, { backgroundColor: C.pill, marginRight: 6 }]}>
-                          <Text style={smallTxt}>Standard</Text>
-                        </Press>
-                        <Press
-                          onPress={() => openInApp(d.uncompressed ? d.uncompressed : d.hires)}
-                          style={[smallBtn, { backgroundColor: 'rgba(10,132,255,0.2)', borderWidth: 1, borderColor: 'rgba(10,132,255,0.55)' }]}
-                        >
-                          <Text style={[smallTxt, { color: '#4DA3FF' }]}>{d.uncompressed ? 'Uncomp.' : 'High res'}</Text>
-                        </Press>
-                      </View>
-                      {d.uncompressed ? (
-                        <Press onPress={() => copyLink(d.uncompressed)} scale={0.95} style={{ paddingTop: 9, alignItems: 'center' }}>
-                          <Text style={{ color: copied === d.uncompressed ? C.green : C.muted, fontSize: 11.5, fontWeight: '600' }}>
-                            {copied === d.uncompressed ? 'Copied' : 'Copy uncompressed link'}
-                          </Text>
-                        </Press>
-                      ) : null}
-                    </View>
+                    linkButton('hi', 'High Resolution', 'Largest version available', d.hires, true)
                   )}
                 </View>
-              </Pop>
-            ))}
-          </View>
+              )}
+            </View>
+          ))}
         </View>
       ) : null}
     </View>
@@ -805,22 +724,28 @@ export default function FinderScreen() {
 
   const lyricsPage = (
     <View>
-      <Header acc={ACC.lyrics} eyebrow="Lyricsify" title="Search Lyrics" />
-      <Card>
-        <Label>Song or artist</Label>
-        <Field
-          acc={ACC.lyrics}
-          icon="search"
+      <Heading
+        eyebrow="Lyricsify"
+        title="Search Lyrics"
+        lead="Type a song or artist. The real Lyricsify page opens right inside the app."
+      />
+      <View style={panel}>
+        <Text style={labelStyle}>Song or artist</Text>
+        <TextInput
           value={lyricQ}
           onChangeText={setLyricQ}
           placeholder="e.g. Lil Nas X"
+          placeholderTextColor={t.muted}
           returnKeyType="search"
           onSubmitEditing={() => searchLyrics()}
           autoCorrect={false}
+          style={field}
         />
-        <Action label="Search" color={ACC.lyrics.c} onPress={() => searchLyrics()} style={{ marginTop: 2 }} />
-      </Card>
-      <Text style={{ color: C.muted, fontSize: 12.5, lineHeight: 18, marginHorizontal: 4 }}>
+        <TouchableOpacity style={goBtn(false)} activeOpacity={0.85} onPress={() => searchLyrics()}>
+          <Text style={goText}>Search</Text>
+        </TouchableOpacity>
+      </View>
+      <Text style={{ color: t.muted, fontSize: 13, lineHeight: 20, marginHorizontal: 2 }}>
         Use the close button on the top left of the opened page to come back here.
       </Text>
     </View>
@@ -830,12 +755,10 @@ export default function FinderScreen() {
   if (tab === 'covers') page = coversPage;
   else if (tab === 'lyrics') page = lyricsPage;
 
-  if (picker) pickerKeep.current = picker;
-  const pk = picker || pickerKeep.current;
-  const pickerItems = pk
-    ? pk.search && pickerQ.trim()
-      ? pk.items.filter((c) => c.name.toLowerCase().includes(pickerQ.trim().toLowerCase()) || c.code === pickerQ.trim().toLowerCase())
-      : pk.items
+  const pickerItems = picker
+    ? picker.search && pickerQ.trim()
+      ? picker.items.filter((c) => c.name.toLowerCase().includes(pickerQ.trim().toLowerCase()) || c.code === pickerQ.trim().toLowerCase())
+      : picker.items
     : [];
 
   const menuItem = (key, icon, title, sub) => (
@@ -876,63 +799,18 @@ export default function FinderScreen() {
 
       {/* Music Finder */}
       <Modal visible={open} animationType="slide" onRequestClose={close}>
-        <StatusBar barStyle="light-content" backgroundColor="#000000" />
-        <SafeAreaProvider style={{ flex: 1 }}>
-          <Shell>
-            {(ins) => (
-              <View style={{ flex: 1, backgroundColor: C.bg }}>
-                {/* top bar */}
-                <View style={{ paddingTop: ins.top + 6, paddingBottom: 8, paddingHorizontal: 14, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 5 }}>
-                  <View style={{ height: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Press onPress={close} scale={0.9} style={roundBtn}>
-                      <Ionicons name="chevron-down" size={20} color={C.text} />
-                    </Press>
-                    <Text style={{ position: 'absolute', left: 0, right: 0, textAlign: 'center', color: C.text, fontSize: 16, fontWeight: '700' }} pointerEvents="none">
-                      Music Finder
-                    </Text>
-                    <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
-                      <Animated.View pointerEvents="none" style={ring(pulseA)} />
-                      <Animated.View pointerEvents="none" style={ring(pulseB)} />
-                      <Press onPress={() => setInfo(true)} scale={0.9} style={roundBtn}>
-                        <Ionicons name="information" size={19} color={C.text} />
-                      </Press>
-                    </View>
-                  </View>
-                  <Animated.View
-                    pointerEvents="none"
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      height: 1,
-                      backgroundColor: C.hair,
-                      opacity: scrollY.interpolate({ inputRange: [0, 10], outputRange: [0, 1], extrapolate: 'clamp' }),
-                    }}
-                  />
-                </View>
-
-                <Animated.ScrollView
-                  keyboardShouldPersistTaps="handled"
-                  scrollEventThrottle={16}
-                  onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
-                  contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 36 }}
-                >
-                  <TabEnter key={tab}>{page}</TabEnter>
-                </Animated.ScrollView>
-
-                {/* bottom tabs */}
-                <View style={{ flexDirection: 'row', backgroundColor: '#000', borderTopWidth: 1, borderTopColor: C.hair, paddingTop: 7, paddingBottom: ins.bottom + 6 }}>
-                  {NAV.map((x) => (
-                    <TabItem key={x.key} item={x} active={tab === x.key && x.key !== 'automate'} onPress={() => goTab(x.key)} />
-                  ))}
-                </View>
-
-                <LivePill pill={pill} top={ins.top + 6} />
-              </View>
-            )}
-          </Shell>
-        </SafeAreaProvider>
+        <Screen t={t} title="Music Finder" onClose={close}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 30 }}>
+            {page}
+          </ScrollView>
+          <View style={{ flexDirection: 'row', backgroundColor: t.card, borderTopWidth: 1, borderTopColor: line }}>
+            {NAV.map((x) => (
+              <TouchableOpacity key={x.key} activeOpacity={0.7} onPress={() => goTab(x.key)} style={{ flex: 1, paddingVertical: 16, alignItems: 'center' }}>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: tab === x.key && x.key !== 'automate' ? t.accent : t.muted }}>{x.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </Screen>
 
         {/* hidden: plays the preview clips */}
         <View style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }} pointerEvents="none">
@@ -946,55 +824,44 @@ export default function FinderScreen() {
           />
         </View>
 
-        {/* what each page is about */}
-        <Sheet visible={info} onClose={() => setInfo(false)} bottom={insets.bottom + 16}>
-          <View style={{ paddingHorizontal: 20, paddingTop: 6 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
-              <Squircle size={40} radius={12} color={acc.c} icon={acc.icon} ink={acc.ink} />
-              <View style={{ marginLeft: 12 }}>
-                <Text style={{ color: acc.c, fontSize: 11, fontWeight: '700', letterSpacing: 0.9, textTransform: 'uppercase' }}>{meta.kicker}</Text>
-                <Text style={{ color: C.text, fontSize: 18, fontWeight: '800', marginTop: 1 }}>{meta.title}</Text>
+        <Modal visible={!!picker} animationType="fade" transparent onRequestClose={() => setPicker(null)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+            <View style={{ backgroundColor: t.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '75%', padding: 16 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={{ flex: 1, color: t.text, fontSize: 17, fontWeight: '800' }}>{picker ? picker.title : ''}</Text>
+                <TouchableOpacity onPress={() => setPicker(null)}>
+                  <Ionicons name="close" size={26} color={t.text} />
+                </TouchableOpacity>
               </View>
-            </View>
-            <Text style={{ color: '#C7C7CC', fontSize: 14.5, lineHeight: 21, marginBottom: 20 }}>{meta.text}</Text>
-            <Action label="Done" color="#FFFFFF" ink="#000000" glow={false} onPress={() => setInfo(false)} />
-          </View>
-        </Sheet>
-
-        {/* pick from a list (Media, Region) */}
-        <Sheet visible={!!picker} onClose={() => setPicker(null)} bottom={insets.bottom + 12} maxHeight="78%">
-          <View style={{ paddingHorizontal: 16 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12, marginTop: 2 }}>
-              <Text style={{ flex: 1, color: C.text, fontSize: 17, fontWeight: '800' }}>{pk ? pk.title : ''}</Text>
-              <Press onPress={() => setPicker(null)} scale={0.92} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                <Text style={{ color: C.blue, fontSize: 17, fontWeight: '600' }}>Done</Text>
-              </Press>
-            </View>
-            {pk && pk.search ? <Field acc={ACC.covers} icon="search" value={pickerQ} onChangeText={setPickerQ} placeholder="Search a country" autoCorrect={false} /> : null}
-            <View style={{ backgroundColor: C.list, borderRadius: 16, overflow: 'hidden', maxHeight: 360 }}>
+              {picker && picker.search ? (
+                <TextInput
+                  value={pickerQ}
+                  onChangeText={setPickerQ}
+                  placeholder="Search a country"
+                  placeholderTextColor={t.muted}
+                  style={[field, { marginBottom: 6 }]}
+                />
+              ) : null}
               <FlatList
                 data={pickerItems}
                 keyExtractor={(c) => c.code}
                 keyboardShouldPersistTaps="handled"
-                ItemSeparatorComponent={() => <View style={{ height: 1, marginLeft: 16, backgroundColor: C.hair2 }} />}
                 renderItem={({ item }) => (
-                  <Press
+                  <TouchableOpacity
                     onPress={() => {
-                      pk.onPick(item.code);
+                      picker.onPick(item.code);
                       setPicker(null);
                     }}
-                    scale={0.99}
-                    tint="rgba(255,255,255,0.06)"
-                    style={{ paddingVertical: 14, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' }}
+                    style={{ paddingVertical: 13, flexDirection: 'row', alignItems: 'center' }}
                   >
-                    <Text style={{ flex: 1, color: C.text, fontSize: 15, fontWeight: pk && item.code === pk.value ? '700' : '500' }}>{item.name}</Text>
-                    {pk && item.code === pk.value ? <Ionicons name="checkmark" size={20} color={C.blue} /> : null}
-                  </Press>
+                    <Text style={{ flex: 1, color: t.text, fontSize: 15, fontWeight: picker && item.code === picker.value ? '800' : '500' }}>{item.name}</Text>
+                    {picker && item.code === picker.value ? <Ionicons name="checkmark" size={20} color={t.accent} /> : null}
+                  </TouchableOpacity>
                 )}
               />
             </View>
           </View>
-        </Sheet>
+        </Modal>
       </Modal>
     </View>
   );
